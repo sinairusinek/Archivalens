@@ -1,0 +1,5 @@
+{
+  "name": "ArchivalLens AI",
+  "description": "A powerful tool for analyzing, indexing, transcribing, and clustering archival documents using Gemini 2.5 Flash and Pro models.",
+  "requestFramePermissions": []
+}
