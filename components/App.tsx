@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { 
   FolderOpen, FileText, Upload, Settings, Play, Download, 
   CheckCircle, Loader2, AlertCircle, Maximize2, X, Flag, CheckSquare, Square, Info, ExternalLink, Languages, FileUp, Split, Edit3, Bot,
-  ZoomIn, ZoomOut, Type, MapPin, Users, Building, Calendar, Mail, User, Filter, Cloud, Code, ExternalLink as OpenIcon
+  ZoomIn, ZoomOut, Type, MapPin, Users, Building, Calendar, Mail, User, Filter, Cloud, Code
 } from 'lucide-react';
 import { ArchivalPage, AppState, AnalysisMode, Tier, ProcessingStatus, Cluster } from '../types';
 import { analyzePageContent, transcribeAndTranslatePage, clusterPages } from '../services/geminiService';
@@ -805,6 +805,7 @@ const App: React.FC = () => {
                   // Determine visual state for transcription
                   const hasManual = !!page.manualTranscription;
                   const hasAI = !!page.generatedTranscription;
+                  const hasContent = hasManual || hasAI;
                   
                   let borderColor = "border-slate-300";
                   let bgColor = "bg-white";
@@ -884,7 +885,7 @@ const App: React.FC = () => {
                              />
                              <button 
                                 onClick={() => setExpandedField({pageId: page.id, field: 'manualTranscription', label: 'Transcription'})}
-                                className="absolute top-9 right-1 px-3 py-1 bg-emerald-50 border border-emerald-200 text-emerald-600 rounded shadow-sm hover:bg-emerald-600 hover:text-white transition-all text-xs font-medium flex items-center gap-1 group/btn"
+                                className={`absolute ${hasContent ? 'bottom-2 right-2' : 'top-9 right-1'} px-3 py-1 bg-emerald-50 border border-emerald-200 text-emerald-600 rounded shadow-sm hover:bg-emerald-600 hover:text-white transition-all text-xs font-medium flex items-center gap-1 group/btn`}
                                 title="Open Workstation"
                              >
                                 <Maximize2 className="w-3 h-3 group-hover/btn:text-white" />
