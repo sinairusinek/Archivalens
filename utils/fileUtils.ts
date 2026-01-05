@@ -1,5 +1,5 @@
 
-import { ArchivalPage, Cluster, AppState } from "../types";
+import { ArchivalPage, Cluster, AppState, ReconciliationRecord, EntityReference } from "../types";
 
 export const generateTSV = (pages: ArchivalPage[]): string => {
   const headers = [
@@ -61,6 +61,43 @@ export const generateClustersTSV = (clusters: Cluster[]): string => {
   ]);
   
   return [headers.join("\t"), ...rows.map(r => r.join("\t"))].join("\n");
+};
+
+export const generateVocabularyCSV = (reconciliationList: ReconciliationRecord[]): string => {
+  const headers = [
+    "ID",
+    "Type",
+    "Extracted Name",
+    "Matched Authority Name",
+    "Authority ID",
+    "Status",
+    "Appearances Count",
+    "Added At"
+  ];
+  
+  const rows = reconciliationList.map(r => [
+    r.id,
+    r.type,
+    `"${r.extractedName.replace(/"/g, '""')}"`,
+    `"${(r.matchedName || "").replace(/"/g, '""')}"`,
+    r.matchedId?.toString() || "",
+    r.status,
+    // Fix: Changed r.sourceIds to r.sourceAppearances as sourceIds does not exist on ReconciliationRecord
+    r.sourceAppearances.length.toString(),
+    r.addedAt || ""
+  ]);
+  
+  return [headers.join(","), ...rows.map(r => r.join(","))].join("\n");
+};
+
+export const generateMasterVocabularyCSV = (vocab: EntityReference[]): string => {
+  const headers = ["ID", "Name", "Type"];
+  const rows = vocab.map(v => [
+    v.id?.toString() || "",
+    `"${v.name.replace(/"/g, '""')}"`,
+    v.type || ""
+  ]);
+  return [headers.join(","), ...rows.map(r => r.join(","))].join("\n");
 };
 
 export const generateFullJSON = (

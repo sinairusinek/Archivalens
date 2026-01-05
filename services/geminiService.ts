@@ -15,13 +15,8 @@ const PRISON_LIST = [
   "Unknown", "Wilhelma-Hamîdije Internment Camp", "Women's Prison, Bethlehem"
 ];
 
-const getAiClient = () => {
-  const apiKey = process.env.API_KEY;
-  if (!apiKey) {
-    throw new Error("API_KEY is not set in environment variables");
-  }
-  return new GoogleGenAI({ apiKey });
-};
+// Correctly initialize GoogleGenAI once with process.env.API_KEY as per guidelines
+const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
 const rotateCanvas = (sourceCanvas: HTMLCanvasElement, degrees: number): HTMLCanvasElement => {
   if (degrees === 0) return sourceCanvas;
@@ -104,12 +99,12 @@ const fileToGenerativePart = async (file: File, rotation: number = 0): Promise<{
   });
 };
 
-const generateContentWithRetry = async (ai: GoogleGenAI, params: any, retries = 3): Promise<any> => {
+const generateContentWithRetry = async (params: any, retries = 3): Promise<any> => {
   try { return await ai.models.generateContent(params); } catch (e: any) {
     const isRateLimit = e.status === 429 || e.code === 429 || (e.message && e.message.includes('429')) || (e.status && e.status.toString().includes('RESOURCE_EXHAUSTED'));
     if (isRateLimit && retries > 0) {
       await new Promise(resolve => setTimeout(resolve, 4000 * Math.pow(2, 3 - retries)));
-      return generateContentWithRetry(ai, params, retries - 1);
+      return generateContentWithRetry(params, retries - 1);
     }
     throw e;
   }
@@ -187,13 +182,13 @@ const matchInVocabulary = (name: string): number | undefined => {
 };
 
 export const analyzePageContent = async (page: ArchivalPage, tier: 'FREE' | 'PAID'): Promise<Partial<ArchivalPage>> => {
-  const ai = getAiClient();
   try {
     const imagePart = await fileToGenerativePart(page.fileObj, page.rotation || 0);
     const prompt = `Analyze this archival document page. 1. Identify language(s). 2. Identify production mode (print, photo, handwriting, typewriting). 3. Check for Hebrew handwriting specifically.`;
-    const response = await generateContentWithRetry(ai, {
+    const response = await generateContentWithRetry({
       model: "gemini-3-flash-preview",
-      contents: { role: 'user', parts: [imagePart, { text: prompt }] },
+      // Corrected: pass imagePart directly as part of contents array
+      contents: { parts: [imagePart, { text: prompt }] },
       config: { 
         responseMimeType: "application/json", 
         responseSchema: { 
@@ -207,21 +202,21 @@ export const analyzePageContent = async (page: ArchivalPage, tier: 'FREE' | 'PAI
         } 
       }
     });
+    // response.text is a getter property, not a method
     const result = JSON.parse(repairTruncatedJSON(response.text || "{}"));
     return { ...result, status: 'analyzed' };
   } catch (error) { return { status: 'error', error: "Analysis failed" }; }
 };
 
 export const transcribeAndTranslatePage = async (page: ArchivalPage, tier: 'FREE' | 'PAID'): Promise<Partial<ArchivalPage>> => {
-  const ai = getAiClient();
   try {
     const imagePart = await fileToGenerativePart(page.fileObj, page.rotation || 0);
     let prompt = `Transcribe this archival document exactly. Detect language, preserve layout, and score confidence 1-5. 
     If 'shouldTranslate' is true, provide an English translation.`;
     
-    const response = await generateContentWithRetry(ai, {
+    const response = await generateContentWithRetry({
       model: "gemini-3-flash-preview",
-      contents: { role: 'user', parts: [imagePart, { text: prompt }] },
+      contents: { parts: [imagePart, { text: prompt }] },
       config: { 
         responseMimeType: "application/json", 
         responseSchema: { 
@@ -235,6 +230,7 @@ export const transcribeAndTranslatePage = async (page: ArchivalPage, tier: 'FREE
       }
     });
     
+    // response.text is a property
     const result = safeParseTranscriptionJSON(response.text || "{}");
 
     return { 
@@ -250,7 +246,6 @@ export const transcribeAndTranslatePage = async (page: ArchivalPage, tier: 'FREE
 };
 
 export const clusterPages = async (pages: ArchivalPage[], tier: Tier): Promise<Cluster[]> => {
-  const ai = getAiClient();
   let modelName = tier === Tier.FREE ? "gemini-3-flash-preview" : "gemini-3-pro-preview"; 
   const inputData = pages.map(p => ({ 
     id: p.id, 
@@ -282,7 +277,7 @@ export const clusterPages = async (pages: ArchivalPage[], tier: Tier): Promise<C
   `;
 
   const runClustering = async (model: string) => {
-    const response = await generateContentWithRetry(ai, {
+    const response = await generateContentWithRetry({
       model,
       contents: prompt,
       config: {
@@ -320,6 +315,7 @@ export const clusterPages = async (pages: ArchivalPage[], tier: Tier): Promise<C
         }
       }
     });
+    // response.text is a property
     const clusters = salvageJSONList(response.text || "[]");
     return clusters.map(c => ({
       ...c,

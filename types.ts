@@ -1,3 +1,4 @@
+
 export enum AnalysisMode {
   PDF = 'PDF',
   BATCH_PDF = 'BATCH_PDF',
@@ -20,6 +21,16 @@ export interface ProcessingStatus {
 export interface EntityReference {
   name: string;
   id?: number;
+  type?: 'person' | 'organization' | 'role';
+  gender?: string;
+  lifeSpan?: string;
+  politicalAffiliation?: string;
+  religion?: string;
+  nationality?: string;
+  otherNames?: string;
+  notes?: string;
+  wikidata?: string;
+  otherLinks?: string;
 }
 
 export interface NamedEntities {
@@ -88,12 +99,30 @@ export interface Cluster {
   entities?: NamedEntities;
 }
 
+export interface SourceAppearance {
+  id: string; // e.g. "Doc #1" or "Page Title"
+  note?: string;
+}
+
+export interface ReconciliationRecord {
+  id: string;
+  extractedName: string;
+  type: 'person' | 'organization' | 'role';
+  matchedId?: number;
+  matchedName?: string;
+  status: 'pending' | 'matched' | 'rejected' | 'custom';
+  sourceAppearances: SourceAppearance[];
+  addedAt?: string; // Date for custom additions
+}
+
 export interface AppState {
   apiKey: string | null;
   mode: AnalysisMode | null;
   tier: Tier;
   files: ArchivalPage[];
   clusters: Cluster[];
+  reconciliationList: ReconciliationRecord[];
+  masterVocabulary: EntityReference[];
   processingStatus: ProcessingStatus;
   uiState: 'welcome' | 'config' | 'dashboard' | 'clustering' | 'entities';
   archiveName?: string;
