@@ -1,12 +1,31 @@
-import React, { useState, useEffect, useRef } from 'react';
+
+import React, { useState, useEffect, useMemo } from 'react';
 import { 
-  FolderOpen, FileText, Upload, Settings, Play, Download, 
-  CheckCircle, Loader2, AlertCircle, Maximize2, X, Flag, CheckSquare, Square, Info, ExternalLink, Languages, FileUp, Split, Edit3, Bot,
-  ZoomIn, ZoomOut, Type, MapPin, Users, Building, Calendar, Mail, User, Filter, Cloud, Code
+  FolderOpen, FileText, Settings, Play, Download, CheckCircle, Loader2, Maximize2, X, Flag, CheckSquare, Square, Info, 
+  Languages, FileUp, Edit3, Bot, ZoomIn, ZoomOut, Type, MapPin, Users, Building, Calendar, Mail, User, Filter, Cloud, Code, 
+  LayoutGrid, Save, FileJson, RotateCw, RotateCcw, Library, AlertTriangle, Upload, ChevronDown, Hash, ListChecks, ArrowRightLeft,
+  Search, ExternalLink, Globe, UserCheck, Tag, FileOutput, Package, Briefcase, Sparkles, Bookmark, CloudUpload, Clock, Trash2,
+  ChevronRight, PanelLeft, StickyNote, Activity, PieChart, Database, ListFilter, Briefcase as RoleIcon, Plus, Link as LinkIcon, Link2Off,
+  FileSpreadsheet, ShieldCheck, Star
 } from 'lucide-react';
-import { ArchivalPage, AppState, AnalysisMode, Tier, ProcessingStatus, Cluster } from '../types';
+import { ArchivalPage, AppState, AnalysisMode, Tier, ProcessingStatus, Cluster, Correspondent, EntityReference, NamedEntities } from '../types';
 import { analyzePageContent, transcribeAndTranslatePage, clusterPages } from '../services/geminiService';
-import { generateTSV, generateClustersTSV, generateFullJSON, downloadFile } from '../utils/fileUtils';
+import { listFilesFromDrive, fetchFileFromDrive, uploadFileToDrive } from '../services/googleDriveService';
+import { generateTSV, generateClustersTSV, generateFullJSON, generateProjectBackup, generateProjectZip, downloadFile } from '../utils/fileUtils';
+import { CONTROLLED_VOCABULARY, SUBJECTS_LIST } from '../services/vocabulary';
+
+const PRESET_ARCHIVES = [
+  "CAHJP - Central Archives for the History of the Jewish People (Magnes)",
+  "CZA - Central Zionist Archive",
+  "HA - Haganah Archives",
+  "HMA - Haifa Municipality Archives",
+  "IPA - Israeli Press Archive",
+  "ISA - Israel State Archives",
+  "JIA - Jabotinsky Institute Archives",
+  "JMA - Jerusalem Municipal Archives",
+  "Press",
+  "TAMA - Tel Aviv Municipal Archives"
+];
 
 const INITIAL_STATE: AppState = {
   apiKey: process.env.API_KEY || null,
@@ -14,1264 +33,608 @@ const INITIAL_STATE: AppState = {
   tier: Tier.FREE,
   files: [],
   clusters: [],
-  processingStatus: {
-    total: 0,
-    processed: 0,
-    currentStep: 'idle',
-    isComplete: false,
-  },
+  processingStatus: { total: 0, processed: 0, currentStep: 'idle', isComplete: false },
   uiState: 'welcome',
+  archiveName: "",
 };
 
-// Helper to detect if text contains Hebrew for RTL direction
 const getTextDirection = (text: string | undefined): 'rtl' | 'ltr' => {
   if (!text) return 'ltr';
-  const hebrewRegex = /[\u0590-\u05FF]/;
-  return hebrewRegex.test(text) ? 'rtl' : 'ltr';
+  return /[\u0590-\u05FF]/.test(text) ? 'rtl' : 'ltr';
+};
+
+const resolveEntity = (name: string): EntityReference => {
+  const low = name.toLowerCase();
+  const match = CONTROLLED_VOCABULARY.find(v => v.name.toLowerCase() === low);
+  return { name, id: match?.id };
 };
 
 const App: React.FC = () => {
   const [state, setState] = useState<AppState>(INITIAL_STATE);
   const [pageRange, setPageRange] = useState<{start: number, end: number} | null>(null);
-  const [zoomedImage, setZoomedImage] = useState<string | null>(null);
-  const [customFolderName, setCustomFolderName] = useState<string>("");
+  const [useRange, setUseRange] = useState(false);
+  const [rangeStart, setRangeStart] = useState(1);
+  const [rangeEnd, setRangeEnd] = useState(1);
+
+  const [zoomedPageId, setZoomedPageId] = useState<string | null>(null);
   const [projectTitle, setProjectTitle] = useState<string>("Archival Project");
-  const [expandedField, setExpandedField] = useState<{ pageId: string, field: 'manualTranscription' | 'manualDescription' | 'translation', label: string } | null>(null);
-  const [showCredits, setShowCredits] = useState(false);
-  const [isProcessingPDF, setIsProcessingPDF] = useState(false);
-  const [isConnectingDrive, setIsConnectingDrive] = useState(false);
-  const [todoNotes, setTodoNotes] = useState<string>(() => localStorage.getItem("archivalLens_todo") || "");
+  const [archiveName, setArchiveName] = useState<string>("");
+  const [expandedField, setExpandedField] = useState<{ pageId: string, field: 'manualTranscription' | 'manualDescription' | 'generatedTranslation', label: string } | null>(null);
+  const [editingClusterId, setEditingClusterId] = useState<number | null>(null);
   
-  // Filtering state
+  const [isProcessingFiles, setIsProcessingFiles] = useState(false);
+  const [selectedEntity, setSelectedEntity] = useState<{name: string, type: 'person' | 'organization' | 'role'} | null>(null);
+  
+  const [searchTerm, setSearchTerm] = useState("");
   const [filterLanguage, setFilterLanguage] = useState<string>("All");
   const [filterProductionMode, setFilterProductionMode] = useState<string>("All");
+  const [filterHandwriting, setFilterHandwriting] = useState<boolean | null>(null);
   
-  // Workstation view controls
-  const [imageZoom, setImageZoom] = useState(1);
-  const [editorFontSize, setEditorFontSize] = useState(14);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  const [isZipping, setIsZipping] = useState(false);
+  const [isUploadingToDrive, setIsUploadingToDrive] = useState(false);
 
-  // --- Helpers for Select All ---
-  const allTranscribe = state.files.length > 0 && state.files.every(f => f.shouldTranscribe);
-  const allTranslate = state.files.length > 0 && state.files.every(f => f.shouldTranslate);
-  const allDownload = state.files.length > 0 && state.files.every(f => f.shouldDownloadImage);
+  const vocabulary = useMemo(() => {
+    const people = new Set<string>();
+    const roles = new Set<string>();
+    const orgs = new Set<string>();
+    const subjects = new Set<string>();
+    CONTROLLED_VOCABULARY.forEach(item => {
+      if (item.type === 'person') people.add(item.name.toLowerCase());
+      if (item.type === 'role') roles.add(item.name.toLowerCase());
+      if (item.type === 'organization') orgs.add(item.name.toLowerCase());
+    });
+    SUBJECTS_LIST.forEach(s => subjects.add(s.toLowerCase()));
+    return { people, roles, orgs, subjects };
+  }, []);
 
-  const toggleAllTranscribe = () => {
-    setState(s => ({...s, files: s.files.map(f => ({...f, shouldTranscribe: !allTranscribe}))}));
+  const filteredPages = useMemo(() => {
+    return state.files.filter(f => {
+      const matchesSearch = searchTerm === "" || 
+        f.indexName.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        (f.generatedTranscription || "").toLowerCase().includes(searchTerm.toLowerCase()) ||
+        (f.manualTranscription || "").toLowerCase().includes(searchTerm.toLowerCase());
+      const matchesLanguage = filterLanguage === "All" || f.language === filterLanguage;
+      const matchesMode = filterProductionMode === "All" || f.productionMode === filterProductionMode;
+      const matchesHandwriting = filterHandwriting === null || f.hasHebrewHandwriting === filterHandwriting;
+      return matchesSearch && matchesLanguage && matchesMode && matchesHandwriting;
+    });
+  }, [state.files, searchTerm, filterLanguage, filterProductionMode, filterHandwriting]);
+
+  const allEntities = useMemo(() => {
+    const peopleMap = new Map<string, string[]>();
+    const orgsMap = new Map<string, string[]>();
+    const rolesMap = new Map<string, string[]>();
+    const addEntity = (map: Map<string, string[]>, name: string, contextId: string) => {
+      if (!name) return;
+      const list = map.get(name) || [];
+      if (!list.includes(contextId)) list.push(contextId);
+      map.set(name, list);
+    };
+    state.clusters.forEach(c => {
+      c.entities?.people?.forEach(p => addEntity(peopleMap, p.name, `Doc #${c.id}`));
+      c.entities?.organizations?.forEach(o => addEntity(orgsMap, o.name, `Doc #${c.id}`));
+      c.entities?.roles?.forEach(r => addEntity(rolesMap, r.name, `Doc #${c.id}`));
+      c.senders?.forEach(s => addEntity(peopleMap, s.name, `Doc #${c.id} (Sender)`));
+      c.recipients?.forEach(r => addEntity(peopleMap, r.name, `Doc #${c.id} (Recipient)`));
+    });
+    state.files.forEach(f => {
+      f.entities?.people?.forEach(p => addEntity(peopleMap, p.name, f.indexName));
+      f.entities?.organizations?.forEach(o => addEntity(orgsMap, o.name, f.indexName));
+      f.entities?.roles?.forEach(r => addEntity(rolesMap, r.name, f.indexName));
+    });
+    return {
+      people: Array.from(peopleMap.entries()).map(([name, ids]) => ({ name, ids })),
+      organizations: Array.from(orgsMap.entries()).map(([name, ids]) => ({ name, ids })),
+      roles: Array.from(rolesMap.entries()).map(([name, ids]) => ({ name, ids }))
+    };
+  }, [state.clusters, state.files]);
+
+  const isNameInVocabulary = (name: string, category?: string): boolean => {
+    const low = name.toLowerCase();
+    if (category === 'subjects') return vocabulary.subjects.has(low);
+    return vocabulary.people.has(low) || vocabulary.roles.has(low) || vocabulary.orgs.has(low);
   };
 
-  const toggleAllTranslate = () => {
-    setState(s => ({...s, files: s.files.map(f => ({...f, shouldTranslate: !allTranslate}))}));
-  };
-
-  const toggleAllDownload = () => {
-    setState(s => ({...s, files: s.files.map(f => ({...f, shouldDownloadImage: !allDownload}))}));
-  };
-
-  // Reset zoom when opening workstation
-  useEffect(() => {
-    if (expandedField) {
-      setImageZoom(1);
-      setEditorFontSize(14);
+  const renderBadge = (item: EntityReference | string | undefined, category: string) => {
+    const name = typeof item === 'string' ? item : item?.name;
+    const id = typeof item === 'string' ? undefined : item?.id;
+    if (!name) return null;
+    const isLinked = id !== undefined || isNameInVocabulary(name, category);
+    const colors: Record<string, string> = { people: 'blue', roles: 'orange', orgs: 'purple', subjects: 'indigo', mixed: 'slate' };
+    const baseColor = colors[category] || 'slate';
+    if (category === 'subjects' && isLinked) {
+      return (
+        <span key={name} className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-black transition-all bg-indigo-600 text-white border border-indigo-700 shadow-sm uppercase tracking-tighter">
+          <Bookmark className="w-2.5 h-2.5" /> {name}
+        </span>
+      );
     }
-  }, [expandedField]);
+    return (
+      <span key={name} className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold border transition-all ${!isLinked ? `bg-yellow-50 text-yellow-800 border-yellow-300 shadow-sm` : `bg-${baseColor}-50 text-${baseColor}-700 border-${baseColor}-100`}`}>
+        {!isLinked && <Sparkles className="w-2.5 h-2.5" />} 
+        {name}
+        {id && <span className="ml-1 opacity-40 font-mono text-[8px]">#{id}</span>}
+      </span>
+    );
+  };
 
-  // Save To-Do notes to local storage
-  useEffect(() => {
-    localStorage.setItem("archivalLens_todo", todoNotes);
-  }, [todoNotes]);
-
-  // --- Handlers ---
-
-  const processTiff = async (file: File): Promise<string> => {
-    try {
-      const buffer = await file.arrayBuffer();
-      // @ts-ignore
-      const ifds = window.UTIF.decode(buffer);
-      if (ifds && ifds.length > 0) {
-        const firstPage = ifds[0];
-        // @ts-ignore
-        window.UTIF.decodeImage(buffer, firstPage);
-        // @ts-ignore
-        const rgba = window.UTIF.toRGBA8(firstPage);
-        
-        const canvas = document.createElement('canvas');
-        canvas.width = firstPage.width;
-        canvas.height = firstPage.height;
-        const ctx = canvas.getContext('2d');
-        if (ctx) {
-          const imgData = ctx.createImageData(canvas.width, canvas.height);
-          for (let i = 0; i < rgba.length; i++) {
-            imgData.data[i] = rgba[i];
-          }
-          ctx.putImageData(imgData, 0, 0);
-          return canvas.toDataURL('image/png');
-        }
-      }
-    } catch (e) {
-      console.error("Failed to process TIFF", e);
-    }
-    return ''; // Fail silently or with placeholder
+  const renderConfidence = (score: number | undefined) => {
+    if (!score) return null;
+    return (
+      <div className="flex items-center gap-0.5" title={`Confidence: ${score}/5`}>
+        {[1, 2, 3, 4, 5].map(s => (
+          <Star key={s} className={`w-2.5 h-2.5 ${s <= score ? 'text-amber-400 fill-amber-400' : 'text-slate-200 fill-slate-200'}`} />
+        ))}
+      </div>
+    );
   };
 
   const processPdf = async (pdfFile: File): Promise<File[]> => {
-    try {
-      const arrayBuffer = await pdfFile.arrayBuffer();
-      // @ts-ignore
-      const pdf = await window.pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-      const images: File[] = [];
-      
-      for (let i = 1; i <= pdf.numPages; i++) {
-        const page = await pdf.getPage(i);
-        const scale = 2.0; // Higher scale for better OCR/Analysis
-        const viewport = page.getViewport({ scale });
-        const canvas = document.createElement('canvas');
-        const context = canvas.getContext('2d');
-        canvas.height = viewport.height;
-        canvas.width = viewport.width;
-        
-        if (context) {
-            await page.render({ canvasContext: context, viewport: viewport }).promise;
-            const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.8));
-            if (blob) {
-                images.push(new File([blob], `${pdfFile.name.replace('.pdf', '')}_page_${i}.jpg`, { type: 'image/jpeg' }));
-            }
-        }
+    const arrayBuffer = await pdfFile.arrayBuffer();
+    // @ts-ignore
+    const pdf = await window.pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+    const images: File[] = [];
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i);
+      const viewport = page.getViewport({ scale: 2.0 });
+      const canvas = document.createElement('canvas');
+      const context = canvas.getContext('2d');
+      canvas.height = viewport.height;
+      canvas.width = viewport.width;
+      if (context) {
+        await page.render({ canvasContext: context, viewport: viewport }).promise;
+        const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.8));
+        if (blob) images.push(new File([blob], `${pdfFile.name.replace('.pdf', '')}_page_${i}.jpg`, { type: 'image/jpeg' }));
       }
-      return images;
-    } catch (e) {
-      console.error("PDF processing error", e);
-      alert("Failed to process PDF. Please ensure it is a valid PDF file.");
-      return [];
     }
+    return images;
   };
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>, mode: AnalysisMode) => {
-    if (e.target.files && e.target.files.length > 0) {
-      let fileList: File[] = Array.from(e.target.files);
-      
-      if (mode === AnalysisMode.PDF) {
-        setIsProcessingPDF(true);
-        // Expect single PDF
-        const pdfFile = fileList[0];
-        setProjectTitle(pdfFile.name.replace(/\.[^/.]+$/, ""));
-        
-        // Convert PDF to images
-        fileList = await processPdf(pdfFile);
-        setIsProcessingPDF(false);
-        
-        if (fileList.length === 0) return; // Error occurred
+    if (!e.target.files?.length) return;
+    setIsProcessingFiles(true);
+    const fileList = Array.from(e.target.files) as File[];
+    let processedPages: { file: File, fileName: string, indexName: string }[] = [];
+    let derivedTitle = "Project Analysis";
+    if (mode === AnalysisMode.PDF || mode === AnalysisMode.BATCH_PDF) {
+      for (const pdf of fileList) {
+        const pdfTitle = pdf.name.replace(/\.[^/.]+$/, "");
+        if (fileList.length === 1) derivedTitle = pdfTitle;
+        const images = await processPdf(pdf);
+        processedPages.push(...images.map((img, i) => ({ file: img, fileName: img.name, indexName: `${pdfTitle} - Pg ${i + 1}` })));
+      }
+    } else {
+      fileList.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+      derivedTitle = ((fileList[0] as any).webkitRelativePath?.split('/')[0]) || fileList[0].name.replace(/\.[^/.]+$/, "");
+      processedPages = fileList.map(f => ({ file: f, fileName: f.name, indexName: `${derivedTitle} - ${f.name}` }));
+    }
+    const newFiles = await Promise.all(processedPages.map(async (p) => ({
+      id: crypto.randomUUID(), fileName: p.fileName, indexName: p.indexName, fileObj: p.file, previewUrl: URL.createObjectURL(p.file),
+      shouldTranscribe: false, shouldTranslate: false, status: 'pending', shouldDownloadImage: false, rotation: 0,
+    } as ArchivalPage)));
+    setState(s => ({ ...s, mode, files: newFiles, uiState: 'config' }));
+    setProjectTitle(derivedTitle);
+    setRangeStart(1);
+    setRangeEnd(newFiles.length);
+    setIsProcessingFiles(false);
+  };
 
+  const restoreProjectFromBlob = async (blob: Blob) => {
+    // @ts-ignore
+    const zip = await JSZip.loadAsync(blob);
+    const jsonFile = Object.keys(zip.files).find(name => name.endsWith('project_metadata.json'));
+    if (!jsonFile) throw new Error("Metadata not found in zip.");
+    const jsonStr = await zip.files[jsonFile].async('string');
+    const j = JSON.parse(jsonStr);
+    const restoredFiles: ArchivalPage[] = [];
+    for (const savedFile of j.appState.files) {
+      const zipImagePath = Object.keys(zip.files).find(name => name.endsWith(savedFile.fileName));
+      if (zipImagePath) {
+        const b = await zip.files[zipImagePath].async('blob');
+        const fileObj = new File([b], savedFile.fileName, { type: b.type });
+        restoredFiles.push({ ...savedFile, fileObj, previewUrl: URL.createObjectURL(fileObj) });
       } else {
-        // FOLDER Mode or DRIVE Mode
-        // Sort files by name (requirement B)
-        fileList = fileList.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
-
-        // Priority: 1. Custom entered name, 2. Detected folder name from path, 3. Fallback
-        const detectedFolderName = (fileList[0] as any).webkitRelativePath 
-          ? (fileList[0] as any).webkitRelativePath.split('/')[0] 
-          : "";
-          
-        const folderName = customFolderName.trim() || detectedFolderName || "Folder Analysis";
-        setProjectTitle(folderName);
+        restoredFiles.push({ ...savedFile, previewUrl: "https://via.placeholder.com/150?text=Missing" });
       }
-
-      // Process files (async for TIF support)
-      const newFiles = await Promise.all(fileList.map(async (f, index) => {
-        let previewUrl = '';
-        const isTiff = f.type === 'image/tiff' || f.name.toLowerCase().endsWith('.tif') || f.name.toLowerCase().endsWith('.tiff');
-        
-        if (isTiff) {
-          previewUrl = await processTiff(f);
-        } else {
-          previewUrl = URL.createObjectURL(f);
-        }
-
-        let indexName = '';
-        if (mode === AnalysisMode.FOLDER || mode === AnalysisMode.DRIVE) {
-          // Use custom folder name if provided, otherwise try path, otherwise default
-          const relativePath = (f as any).webkitRelativePath;
-          const folderLabel = customFolderName.trim() || (relativePath ? relativePath.split('/')[0] : 'Folder');
-          indexName = `${folderLabel} - ${f.name}`;
-        } else {
-          // PDF mode naming
-          indexName = `${projectTitle || 'PDF'} - Pg ${index + 1}`;
-        }
-
-        return {
-          id: crypto.randomUUID(),
-          fileName: f.name,
-          indexName: indexName,
-          fileObj: f,
-          previewUrl: previewUrl || 'https://via.placeholder.com/150?text=No+Preview',
-          shouldTranscribe: false,
-          shouldTranslate: false,
-          status: 'pending',
-          shouldDownloadImage: false,
-        } as ArchivalPage;
-      }));
-
-      setState(prev => ({
-        ...prev,
-        mode,
-        files: newFiles,
-        uiState: 'config'
-      }));
     }
+    setState({ ...INITIAL_STATE, ...j.appState, files: restoredFiles, uiState: 'dashboard' });
+    setProjectTitle(j.meta?.projectTitle || "Restored Project");
+    if (j.meta?.archiveName) setArchiveName(j.meta.archiveName);
   };
 
-  const handleDriveConnect = () => {
-    setIsConnectingDrive(true);
-    // Simulate authentication delay
-    setTimeout(() => {
-        setIsConnectingDrive(false);
-        // Trigger the folder input as a fallback/simulation for selecting "Drive" folders synced to the OS
-        const driveInput = document.getElementById('drive-folder-input');
-        if (driveInput) {
-            driveInput.click();
-        }
-    }, 1500);
-  };
-
-  const handleTranscriptionUpload = (e: React.ChangeEvent<HTMLInputElement>, pageId: string) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        const text = event.target?.result as string;
-        setState(s => ({
-          ...s,
-          files: s.files.map(f => f.id === pageId ? { ...f, manualTranscription: text } : f)
-        }));
-      };
-      reader.readAsText(file);
-    }
-  };
-
-  const startAnalysis = async () => {
-    // Apply Range Filter
-    let filesToProcess = state.files;
-    if (pageRange) {
-      filesToProcess = state.files.slice(pageRange.start - 1, pageRange.end);
-    }
-    
-    setState(prev => ({
-      ...prev,
-      files: filesToProcess, 
-      uiState: 'dashboard',
-      processingStatus: {
-        total: filesToProcess.length,
-        processed: 0,
-        currentStep: 'Analyzing Metadata...',
-        isComplete: false
-      }
-    }));
-
-    // Start Batch Processing for Step C (Metadata)
-    processBatch(filesToProcess, 'METADATA');
-  };
-
-  const processBatch = async (files: ArchivalPage[], type: 'METADATA' | 'TRANSCRIPTION') => {
-    // Reduce concurrency for free tier to avoid 429
-    // PAID: 5 parallel requests
-    // FREE: 1 request at a time (Sequential) to prevent rate limit hits
-    const concurrency = state.tier === Tier.PAID ? 5 : 1; 
-    let processedCount = 0;
-
-    const processItem = async (page: ArchivalPage) => {
-      setState(prev => ({
-        ...prev,
-        files: prev.files.map(f => f.id === page.id ? { ...f, status: type === 'METADATA' ? 'analyzing' : 'transcribing' } : f)
-      }));
-
-      let result: Partial<ArchivalPage> = {};
-      
-      if (type === 'METADATA') {
-        result = await analyzePageContent(page, state.tier);
-      } else {
-        if (page.shouldTranscribe || page.shouldTranslate) {
-          result = await transcribeAndTranslatePage(page, state.tier);
-        } else {
-          result = { status: 'done' }; // Skip if not marked
-        }
-      }
-
-      setState(prev => {
-        const updatedFiles = prev.files.map(f => f.id === page.id ? { ...f, ...result } : f);
-        return {
-          ...prev,
-          files: updatedFiles,
-          processingStatus: {
-            ...prev.processingStatus,
-            processed: prev.processingStatus.processed + 1
-          }
-        };
-      });
-    };
-
-    // Simple chunk queue
-    for (let i = 0; i < files.length; i += concurrency) {
-      const chunk = files.slice(i, i + concurrency);
-      await Promise.all(chunk.map(processItem));
-    }
-
-    setState(prev => ({
-      ...prev,
-      processingStatus: {
-        ...prev.processingStatus,
-        isComplete: true,
-        currentStep: type === 'METADATA' ? 'Metadata Analysis Complete' : 'Transcription Complete'
-      }
-    }));
-  };
-
-  const runTranscription = () => {
-    // Filter pages that need processing
-    const toProcess = state.files.filter(f => f.shouldTranscribe || f.shouldTranslate);
-    
-    setState(prev => ({
-      ...prev,
-      processingStatus: {
-        total: toProcess.length,
-        processed: 0,
-        currentStep: 'Transcribing & Translating...',
-        isComplete: false
-      }
-    }));
-
-    processBatch(toProcess, 'TRANSCRIPTION');
-  };
-
-  const runClustering = async () => {
-    setState(prev => ({ ...prev, processingStatus: { ...prev.processingStatus, currentStep: 'Clustering Documents...', isComplete: false } }));
+  const loadFromDrive = async () => {
     try {
-      // Pass the current tier to the clustering service to choose the appropriate model
-      const clusters = await clusterPages(state.files, state.tier);
-      setState(prev => ({ 
-        ...prev, 
-        clusters, 
-        uiState: 'clustering',
-        processingStatus: { ...prev.processingStatus, currentStep: 'Clustering Complete', isComplete: true }
-      }));
-    } catch (e) {
-      console.error(e);
-      alert("Clustering failed. The system will reset the process. Please check your quota or try again.");
-      setState(prev => ({ ...prev, processingStatus: { ...prev.processingStatus, currentStep: 'Clustering Failed', isComplete: true } }));
-    }
+      const files = await listFilesFromDrive();
+      if (files.length === 0) { alert("No backup files found on Drive."); return; }
+      const fileId = prompt("Select File ID:\n" + files.map(f => `${f.name} (ID: ${f.id})`).join('\n'));
+      if (!fileId) return;
+      setIsProcessingFiles(true);
+      const blob = await fetchFileFromDrive(fileId);
+      await restoreProjectFromBlob(blob);
+    } catch (e: any) { alert("Drive load failed: " + e.message); } finally { setIsProcessingFiles(false); }
   };
 
-  const runBatchDownload = async () => {
-      const selected = state.files.filter(f => f.shouldDownloadImage);
-      if(selected.length === 0) return;
-      
-      for(const page of selected) {
-          const a = document.createElement('a');
-          a.href = page.previewUrl;
-          a.download = page.fileName;
-          document.body.appendChild(a);
-          a.click();
-          document.body.removeChild(a);
-          await new Promise(r => setTimeout(r, 500)); // Delay to prevent blocking
-      }
+  const saveToDrive = async () => {
+    setIsUploadingToDrive(true);
+    try {
+      const zipBlob = await generateProjectZip(state, projectTitle, archiveName || "", pageRange);
+      await uploadFileToDrive(zipBlob, `${projectTitle.replace(/[^a-z0-9]/gi, '_')}.aln_project.zip`);
+      alert("Successfully saved to Google Drive!");
+    } catch (e: any) { alert("Drive upload failed: " + e.message); } finally { setIsUploadingToDrive(false); }
   };
 
-  // --- Render Helpers ---
-
-  const renderCreditsModal = () => {
-    if (!showCredits) return null;
-    return (
-      <div className="fixed inset-0 z-[60] bg-slate-900/50 flex items-center justify-center p-4 backdrop-blur-sm" onClick={() => setShowCredits(false)}>
-        <div className="bg-white rounded-xl shadow-2xl max-w-md w-full p-6 relative" onClick={e => e.stopPropagation()}>
-           <button onClick={() => setShowCredits(false)} className="absolute top-4 right-4 text-slate-400 hover:text-slate-600">
-             <X className="w-5 h-5" />
+  const renderWelcome = () => (
+    <div className="flex-1 flex flex-col items-center justify-center p-8 bg-white text-slate-900 overflow-y-auto">
+      <div className="max-w-4xl w-full text-center space-y-12">
+        <div className="space-y-4">
+          <div className="inline-flex items-center gap-2 px-4 py-1.5 bg-blue-50 text-blue-600 rounded-full text-xs font-black uppercase tracking-widest border border-blue-100"><Sparkles className="w-4 h-4" /> Powered by Gemini 3</div>
+          <h1 className="text-8xl font-black italic tracking-tighter uppercase leading-[0.8] text-transparent bg-clip-text bg-gradient-to-br from-slate-900 via-slate-800 to-slate-500">Archival<br />Lens</h1>
+          <p className="text-xl text-slate-500 font-medium max-w-2xl mx-auto italic">Advanced AI-driven processing for mandate-era archival collections. Transcribe, translate, and cluster historical documents at scale.</p>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div className="group relative bg-white border border-slate-200 rounded-[48px] p-10 hover:border-blue-500 hover:shadow-2xl hover:shadow-blue-500/10 transition-all cursor-pointer">
+            <input type="file" multiple {...({webkitdirectory: "", mozdirectory: ""} as any)} className="absolute inset-0 opacity-0 cursor-pointer z-10" onChange={e => handleFileUpload(e, AnalysisMode.FOLDER)} />
+            <div className="w-16 h-16 bg-blue-500 rounded-3xl flex items-center justify-center mx-auto mb-6 transition-transform group-hover:scale-110 shadow-lg group-hover:shadow-blue-500/20"><FolderOpen className="w-8 h-8 text-white" /></div>
+            <h3 className="text-2xl font-black uppercase italic tracking-tight text-slate-800">Process Folder</h3>
+            <p className="text-slate-400 text-sm font-bold uppercase tracking-widest">Local Images or TIFFs</p>
+          </div>
+          <div className="group relative bg-white border border-slate-200 rounded-[48px] p-10 hover:border-emerald-500 hover:shadow-2xl hover:shadow-emerald-500/10 transition-all cursor-pointer">
+            <input type="file" multiple accept=".pdf" className="absolute inset-0 opacity-0 cursor-pointer z-10" onChange={e => handleFileUpload(e, AnalysisMode.BATCH_PDF)} />
+            <div className="w-16 h-16 bg-emerald-500 rounded-3xl flex items-center justify-center mx-auto mb-6 transition-transform group-hover:scale-110 shadow-lg group-hover:shadow-emerald-500/20"><FileText className="w-8 h-8 text-white" /></div>
+            <h3 className="text-2xl font-black uppercase italic tracking-tight text-slate-800">Process PDFs</h3>
+            <p className="text-slate-400 text-sm font-bold uppercase tracking-widest">Multi-page analysis</p>
+          </div>
+        </div>
+        <div className="flex items-center justify-center gap-12 pt-8 border-t border-slate-100">
+           <label className="flex items-center gap-3 cursor-pointer group">
+              <input type="file" accept=".zip,.json" className="hidden" onChange={async (e) => {
+                const file = e.target.files?.[0];
+                if (!file) return;
+                setIsProcessingFiles(true);
+                try {
+                  if (file.name.endsWith('.zip')) { await restoreProjectFromBlob(file); } 
+                  else { const text = await file.text(); const j = JSON.parse(text); setState({ ...INITIAL_STATE, ...j.appState, uiState: 'dashboard' }); setProjectTitle(j.meta?.projectTitle || "Restored Project"); }
+                } catch (err: any) { alert("Restore failed: " + err.message); } finally { setIsProcessingFiles(false); }
+              }} />
+              <div className="p-3 bg-slate-50 rounded-2xl group-hover:bg-blue-50 transition-colors border border-slate-100 group-hover:border-blue-100"><CloudUpload className="w-5 h-5 text-slate-400 group-hover:text-blue-500" /></div>
+              <div className="text-left">
+                <div className="text-xs font-black uppercase tracking-widest text-slate-800">Resume Local</div>
+                <div className="text-[10px] font-bold text-slate-400 uppercase">Load .aln backup</div>
+              </div>
+           </label>
+           <button onClick={loadFromDrive} className="flex items-center gap-3 group">
+              <div className="p-3 bg-slate-50 rounded-2xl group-hover:bg-emerald-50 transition-colors border border-slate-100 group-hover:border-emerald-100"><Cloud className="w-5 h-5 text-slate-400 group-hover:text-emerald-500" /></div>
+              <div className="text-left">
+                <div className="text-xs font-black uppercase tracking-widest text-slate-800">Resume Drive</div>
+                <div className="text-[10px] font-bold text-slate-400 uppercase">Import from Google</div>
+              </div>
            </button>
-           <h2 className="text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-600 to-emerald-600 mb-4">About</h2>
-           <div className="space-y-4 text-slate-600">
-              <p className="font-medium">ArchivalLens AI</p>
-              <p className="text-sm">
-                An intelligent tool for analyzing, transcribing, and clustering archival documents.
-              </p>
-              
-              <div className="border-t border-slate-100 pt-4 mt-4">
-                <p className="text-xs uppercase font-bold text-slate-400 mb-2">Created By</p>
-                <div className="flex flex-col">
-                    <span className="text-sm font-semibold text-slate-800">Sinai Rusinek</span>
-                    <a href="mailto:sinai.rusinek@gmail.com" className="text-sm text-blue-600 hover:underline">sinai.rusinek@gmail.com</a>
+        </div>
+      </div>
+      {isProcessingFiles && <div className="fixed inset-0 bg-white/80 flex items-center justify-center z-[100] backdrop-blur-md flex-col gap-4 text-slate-900"><Loader2 className="w-12 h-12 text-blue-500 animate-spin" /><span className="font-black uppercase tracking-widest text-blue-600">Reconstructing Research...</span></div>}
+    </div>
+  );
+
+  const renderCommonHeader = (actions?: React.ReactNode) => (
+    <header className="bg-white border-b px-8 py-4 flex items-center justify-between shrink-0">
+      <div className="flex items-center gap-8">
+        <div className="flex bg-slate-100 p-1 rounded-xl">
+          {['dashboard', 'clustering', 'entities'].map((view: any) => (
+            <button key={view} onClick={() => setState(s => ({ ...s, uiState: view }))} className={`px-4 py-1.5 rounded-lg text-xs font-black uppercase tracking-tight transition-all ${state.uiState === view ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>{view === 'dashboard' ? <LayoutGrid className="w-3.5 h-3.5 inline mr-1.5" /> : view === 'clustering' ? <Library className="w-3.5 h-3.5 inline mr-1.5" /> : <Users className="w-3.5 h-3.5 inline mr-1.5" />}{view}</button>
+          ))}
+        </div>
+        {state.processingStatus.total > 0 && !state.processingStatus.isComplete && (
+          <div className="flex items-center gap-3 px-4 py-1.5 bg-blue-50 border border-blue-100 rounded-xl animate-pulse">
+            <Loader2 className="w-3.5 h-3.5 text-blue-600 animate-spin" />
+            <div className="flex flex-col"><span className="text-[10px] font-black text-blue-600 uppercase tracking-widest">{state.processingStatus.currentStep}</span><span className="text-[9px] font-bold text-blue-400 uppercase">{state.processingStatus.processed} / {state.processingStatus.total} pages</span></div>
+          </div>
+        )}
+      </div>
+      <div className="flex items-center gap-2">
+        {actions}
+        <div className="h-6 w-px bg-slate-200 mx-2" />
+        <div className="flex items-center gap-1 bg-slate-50 p-1 rounded-xl border border-slate-100">
+            <button onClick={() => downloadFile(generateTSV(state.files), `${projectTitle}_pages.tsv`, 'text/tab-separated-values')} className="p-2 hover:bg-white hover:shadow-sm rounded-lg transition-all text-slate-500 hover:text-blue-600 group relative"><FileSpreadsheet className="w-4 h-4" /><span className="absolute bottom-full mb-2 left-1/2 -translate-x-1/2 hidden group-hover:block bg-slate-900 text-white text-[8px] font-black uppercase px-2 py-1 rounded whitespace-nowrap">Pages TSV</span></button>
+            <button onClick={() => downloadFile(generateClustersTSV(state.clusters), `${projectTitle}_clusters.tsv`, 'text/tab-separated-values')} className="p-2 hover:bg-white hover:shadow-sm rounded-lg transition-all text-slate-500 hover:text-emerald-600 group relative"><LayoutGrid className="w-4 h-4" /><span className="absolute bottom-full mb-2 left-1/2 -translate-x-1/2 hidden group-hover:block bg-slate-900 text-white text-[8px] font-black uppercase px-2 py-1 rounded whitespace-nowrap">Clusters TSV</span></button>
+            <button onClick={() => downloadFile(generateProjectBackup(state, projectTitle, archiveName || "", pageRange), `${projectTitle}_backup.json`, 'application/json')} className="p-2 hover:bg-white hover:shadow-sm rounded-lg transition-all text-slate-500 hover:text-orange-600 group relative"><FileJson className="w-4 h-4" /><span className="absolute bottom-full mb-2 left-1/2 -translate-x-1/2 hidden group-hover:block bg-slate-900 text-white text-[8px] font-black uppercase px-2 py-1 rounded whitespace-nowrap">Backup JSON</span></button>
+        </div>
+        <button onClick={saveToDrive} disabled={isUploadingToDrive} className="p-2.5 bg-white border border-slate-200 hover:border-emerald-400 text-slate-600 hover:text-emerald-600 rounded-xl transition-all shadow-sm active:scale-95 group relative">{isUploadingToDrive ? <Loader2 className="w-4 h-4 animate-spin" /> : <Cloud className="w-4 h-4" />}<span className="absolute top-full right-0 mt-2 hidden group-hover:block bg-slate-900 text-white text-[8px] font-black uppercase px-2 py-1 rounded whitespace-nowrap">Save to Drive</span></button>
+        <button onClick={async () => { setIsZipping(true); try { const zipBlob = await generateProjectZip(state, projectTitle, archiveName || "", pageRange); downloadFile(zipBlob, `${projectTitle}.zip`, 'application/zip'); } finally { setIsZipping(false); } }} className="p-2.5 bg-slate-900 text-white rounded-xl transition-all shadow-xl hover:bg-blue-600 active:scale-95 group relative">{isZipping ? <Loader2 className="w-4 h-4 animate-spin" /> : <Package className="w-4 h-4" />}<span className="absolute top-full right-0 mt-2 hidden group-hover:block bg-slate-900 text-white text-[8px] font-black uppercase px-2 py-1 rounded whitespace-nowrap">Export Project ZIP</span></button>
+      </div>
+    </header>
+  );
+
+  const ClusterEditor: React.FC<{ cluster: Cluster, onClose: () => void }> = ({ cluster, onClose }) => {
+    const [draft, setDraft] = useState<Cluster>({ ...cluster });
+    const updateField = (field: keyof Cluster, value: any) => setDraft(d => ({ ...d, [field]: value }));
+    const updateEntityList = (cat: keyof NamedEntities, index: number, field: keyof EntityReference, val: string) => {
+      const newList = [...(draft.entities?.[cat] || [])];
+      newList[index] = { ...newList[index], [field]: val };
+      if (field === 'name') newList[index].id = resolveEntity(val).id;
+      updateField('entities', { ...draft.entities, [cat]: newList });
+    };
+    const addEntity = (cat: keyof NamedEntities) => updateField('entities', { ...draft.entities, [cat]: [...(draft.entities?.[cat] || []), { name: "" }] });
+    const deleteEntity = (cat: keyof NamedEntities, index: number) => { const c = [...(draft.entities?.[cat] || [])]; c.splice(index, 1); updateField('entities', { ...draft.entities, [cat]: c }); };
+    const updateCorrespondent = (type: 'senders' | 'recipients', index: number, field: keyof Correspondent, val: string) => {
+      const newList = [...(draft[type] || [])];
+      newList[index] = { ...newList[index], [field]: val };
+      if (field === 'name') newList[index].id = resolveEntity(val).id;
+      updateField(type, newList);
+    };
+    const saveChanges = () => { setState(s => ({ ...s, clusters: s.clusters.map(c => c.id === cluster.id ? draft : c) })); onClose(); };
+    return (
+      <div className="fixed inset-0 z-[200] bg-slate-900/90 backdrop-blur-xl p-8 flex items-center justify-center">
+        <div className="bg-white w-full max-w-5xl max-h-[90vh] rounded-[48px] shadow-2xl flex flex-col overflow-hidden border border-white/20">
+          <header className="p-8 border-b flex justify-between items-center bg-white shrink-0"><div className="flex items-center gap-4"><div className="w-12 h-12 bg-emerald-600 rounded-2xl flex items-center justify-center text-white shadow-lg"><Edit3 className="w-6 h-6" /></div><div><h2 className="text-2xl font-black italic tracking-tight uppercase">Refine Metadata</h2><p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Doc #{cluster.id}</p></div></div><button onClick={onClose} className="p-2 hover:bg-slate-100 rounded-xl transition-all"><X className="w-8 h-8 text-slate-400" /></button></header>
+          <div className="flex-1 overflow-y-auto p-10 custom-scrollbar space-y-12">
+            <div className="grid grid-cols-2 gap-10">
+              <div className="space-y-6">
+                <div className="space-y-2"><label className="text-[10px] font-black uppercase text-slate-400 tracking-widest">Research Title</label><input type="text" value={draft.title} onChange={e => updateField('title', e.target.value)} className="w-full bg-slate-50 border p-4 rounded-2xl text-sm font-bold" /></div>
+                <div className="space-y-2"><label className="text-[10px] font-black uppercase text-slate-400 tracking-widest">AI Summary</label><textarea value={draft.summary} onChange={e => updateField('summary', e.target.value)} className="w-full bg-slate-50 border p-4 rounded-2xl text-sm font-medium h-32 resize-none" /></div>
+              </div>
+              <div className="space-y-6 bg-slate-50 p-8 rounded-[32px] border border-slate-100">
+                <div className="space-y-2"><label className="text-[10px] font-black uppercase text-slate-400 tracking-widest">Document Types</label><input type="text" value={(draft.docTypes || []).join(', ')} onChange={e => updateField('docTypes', e.target.value.split(',').map(s => s.trim()))} className="w-full bg-white border p-3 rounded-xl text-xs font-bold" /></div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2"><label className="text-[10px] font-black uppercase text-slate-400 tracking-widest">Original Date</label><input type="text" value={draft.originalDate || ""} onChange={e => updateField('originalDate', e.target.value)} className="w-full bg-white border p-3 rounded-xl text-xs font-bold" /></div>
+                  <div className="space-y-2"><label className="text-[10px] font-black uppercase text-slate-400 tracking-widest">ISO Date</label><input type="text" placeholder="YYYY-MM-DD" value={draft.standardizedDate || ""} onChange={e => setDraft(d => ({ ...d, standardizedDate: e.target.value }))} className="w-full bg-white border p-3 rounded-xl text-xs font-bold" /></div>
                 </div>
+                <div className="space-y-2"><label className="text-[10px] font-black uppercase text-slate-400 tracking-widest">Subjects</label><input type="text" value={(draft.subjects || []).join(', ')} onChange={e => updateField('subjects', e.target.value.split(',').map(s => s.trim()))} className="w-full bg-white border p-3 rounded-xl text-xs font-bold" /></div>
               </div>
-
-              <div className="border-t border-slate-100 pt-4">
-                <p className="text-xs uppercase font-bold text-slate-400 mb-2">My To-Do List / Notes</p>
-                <textarea 
-                    className="w-full h-32 p-3 bg-yellow-50 border border-yellow-200 rounded-lg text-sm text-slate-700 focus:ring-2 focus:ring-yellow-400 outline-none resize-none placeholder-yellow-300"
-                    placeholder="Type your notes here... (Saved automatically)"
-                    value={todoNotes}
-                    dir={getTextDirection(todoNotes)}
-                    onChange={(e) => setTodoNotes(e.target.value)}
-                />
-              </div>
-
-              <div className="border-t border-slate-100 pt-4">
-                <p className="text-xs uppercase font-bold text-slate-400 mb-2">Technology</p>
-                <p className="text-sm flex items-center gap-2">
-                  Powered by Google Gemini 2.5 Flash & Pro
-                </p>
-              </div>
-           </div>
-           <div className="mt-6 text-center">
-              <button onClick={() => setShowCredits(false)} className="px-6 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-sm font-medium transition-colors">Close</button>
-           </div>
+            </div>
+            <div className="grid grid-cols-2 gap-10">
+              <section className="space-y-4">
+                <div className="flex items-center justify-between"><h3 className="text-xs font-black uppercase tracking-widest text-slate-800 flex items-center gap-2"><User className="w-4 h-4 text-emerald-500" /> Senders</h3><button onClick={() => updateField('senders', [...(draft.senders || []), { name: "" }])} className="p-1 hover:bg-slate-100 rounded-lg text-emerald-600"><Plus className="w-4 h-4" /></button></div>
+                <div className="space-y-2">{(draft.senders || []).map((s, idx) => (<div key={idx} className="flex gap-2 items-center bg-white p-3 border rounded-xl shadow-sm"><div className="flex-1"><input type="text" value={s.name} onChange={e => updateCorrespondent('senders', idx, 'name', e.target.value)} placeholder="Name" className="text-xs font-bold w-full outline-none" /><input type="text" value={s.role || ""} onChange={e => updateCorrespondent('senders', idx, 'role', e.target.value)} placeholder="Assign Role" className="text-[10px] text-slate-400 italic outline-none w-full" /></div><button onClick={() => { const nl = [...(draft.senders || [])]; nl.splice(idx, 1); updateField('senders', nl); }} className="text-slate-300 hover:text-red-500"><Trash2 className="w-4 h-4" /></button></div>))}</div>
+              </section>
+              <section className="space-y-4">
+                <div className="flex items-center justify-between"><h3 className="text-xs font-black uppercase tracking-widest text-slate-800 flex items-center gap-2"><Mail className="w-4 h-4 text-purple-500" /> Recipients</h3><button onClick={() => updateField('recipients', [...(draft.recipients || []), { name: "" }])} className="p-1 hover:bg-slate-100 rounded-lg text-purple-600"><Plus className="w-4 h-4" /></button></div>
+                <div className="space-y-2">{(draft.recipients || []).map((r, idx) => (<div key={idx} className="flex gap-2 items-center bg-white p-3 border rounded-xl shadow-sm"><div className="flex-1"><input type="text" value={r.name} onChange={e => updateCorrespondent('recipients', idx, 'name', e.target.value)} placeholder="Name" className="text-xs font-bold w-full outline-none" /><input type="text" value={r.role || ""} onChange={e => updateCorrespondent('recipients', idx, 'role', e.target.value)} placeholder="Assign Role" className="text-[10px] text-slate-400 italic outline-none w-full" /></div><button onClick={() => { const nl = [...(draft.recipients || [])]; nl.splice(idx, 1); updateField('recipients', nl); }} className="text-slate-300 hover:text-red-500"><Trash2 className="w-4 h-4" /></button></div>))}</div>
+              </section>
+            </div>
+            <div className="grid grid-cols-3 gap-8 pt-8 border-t border-slate-100">{(['people', 'organizations', 'roles'] as (keyof NamedEntities)[]).map(cat => (<section key={cat} className="space-y-4"><div className="flex items-center justify-between"><h4 className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">{cat}</h4><button onClick={() => addEntity(cat)} className="p-1 hover:bg-slate-100 rounded text-slate-400"><Plus className="w-3 h-3" /></button></div><div className="space-y-2">{(draft.entities?.[cat] || []).map((ent, idx) => (<div key={idx} className="flex items-center gap-2 group"><input type="text" value={ent.name} onChange={e => updateEntityList(cat, idx, 'name', e.target.value)} className={`flex-1 text-[10px] font-bold p-2.5 rounded-lg border transition-all ${ent.id ? 'bg-indigo-50 border-indigo-600 text-indigo-900 shadow-sm' : 'bg-white border-slate-200 focus:border-emerald-500'}`} /><button onClick={() => deleteEntity(cat, idx)} className="opacity-0 group-hover:opacity-100 text-slate-300 hover:text-red-500 p-1 transition-all"><X className="w-3.5 h-3.5" /></button></div>))}</div></section>))}</div>
+          </div>
+          <footer className="p-8 border-t bg-slate-50 flex justify-end gap-3"><button onClick={onClose} className="px-6 py-3 rounded-2xl font-black uppercase text-xs text-slate-500 hover:bg-slate-100">Cancel</button><button onClick={saveChanges} className="px-10 py-3 bg-slate-900 text-white rounded-2xl font-black uppercase text-xs shadow-2xl hover:bg-emerald-600 transition-all">Commit Research</button></footer>
         </div>
       </div>
     );
   };
 
-  const renderWelcome = () => (
-    <div className="flex flex-col items-center justify-center min-h-screen bg-slate-50 text-slate-900 p-8 relative">
-       <button 
-          onClick={() => setShowCredits(true)}
-          className="absolute top-6 right-6 p-2 text-slate-400 hover:text-blue-600 transition-colors flex items-center gap-2"
-        >
-          <span className="text-sm font-medium">About</span>
-          <Info className="w-5 h-5" />
-      </button>
-
-      <h1 className="text-4xl font-bold mb-4 bg-clip-text text-transparent bg-gradient-to-r from-blue-600 to-emerald-600">ArchivalLens AI</h1>
-      <p className="text-slate-500 mb-12 text-center max-w-lg">
-        Intelligent analysis for your digital archives. Categorize, Transcribe, Translate, and Cluster documents automatically.
-      </p>
-
-      {isProcessingPDF && (
-        <div className="fixed inset-0 bg-white/80 z-50 flex flex-col items-center justify-center backdrop-blur-sm">
-           <Loader2 className="w-12 h-12 text-blue-600 animate-spin mb-4" />
-           <p className="text-xl font-medium text-slate-700">Processing PDF...</p>
-           <p className="text-sm text-slate-500 mt-2">Converting pages to high-quality images</p>
-        </div>
-      )}
-
-      {isConnectingDrive && (
-        <div className="fixed inset-0 bg-white/80 z-50 flex flex-col items-center justify-center backdrop-blur-sm">
-           <Loader2 className="w-12 h-12 text-emerald-600 animate-spin mb-4" />
-           <p className="text-xl font-medium text-slate-700">Connecting to Drive...</p>
-           <p className="text-sm text-slate-500 mt-2">Authenticating account</p>
-        </div>
-      )}
-
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-8 w-full max-w-6xl">
-        {/* PDF Option */}
-        <div className="bg-white p-8 rounded-xl border border-slate-200 hover:border-blue-500 shadow-sm hover:shadow-md transition-all flex flex-col items-center group">
-          <div className="w-16 h-16 bg-blue-50 rounded-full flex items-center justify-center mb-6 group-hover:scale-110 transition-transform">
-            <FileText className="w-8 h-8 text-blue-600" />
-          </div>
-          <h2 className="text-xl font-semibold mb-2">PDF Analysis</h2>
-          <p className="text-slate-500 text-sm text-center mb-6">Analyze a single PDF file page by page.</p>
-          <label className="cursor-pointer bg-blue-600 hover:bg-blue-700 text-white py-2 px-6 rounded-lg font-medium transition-colors shadow">
-            Select PDF
-            <input type="file" accept=".pdf" className="hidden" onChange={(e) => handleFileUpload(e, AnalysisMode.PDF)} />
-          </label>
-        </div>
-
-        {/* Folder Option */}
-        <div className="bg-white p-8 rounded-xl border border-slate-200 hover:border-emerald-500 shadow-sm hover:shadow-md transition-all flex flex-col items-center group">
-          <div className="w-16 h-16 bg-emerald-50 rounded-full flex items-center justify-center mb-6 group-hover:scale-110 transition-transform">
-            <FolderOpen className="w-8 h-8 text-emerald-600" />
-          </div>
-          <h2 className="text-xl font-semibold mb-2">Folder Analysis</h2>
-          <p className="text-slate-500 text-sm text-center mb-6">Analyze a folder of images, sorted by name.</p>
-          
-          <div className="w-full mb-6">
-            <label className="block text-xs font-semibold text-slate-500 mb-1 uppercase tracking-wide">
-              Folder Name
-            </label>
-            <input 
-              type="text" 
-              value={customFolderName}
-              onChange={(e) => setCustomFolderName(e.target.value)}
-              placeholder="e.g. Vienna_1920_Letters"
-              className="w-full border border-slate-300 rounded px-3 py-2 text-sm focus:ring-2 focus:ring-emerald-500 outline-none"
-            />
-            <p className="text-[10px] text-slate-400 mt-1">
-              Enter the archival folder name (not in Hebrew, without spaces).
-            </p>
-          </div>
-
-          <label className="cursor-pointer bg-emerald-600 hover:bg-emerald-700 text-white py-2 px-6 rounded-lg font-medium transition-colors shadow w-full text-center">
-            Select Folder (Images)
-            <input type="file" accept="image/*,.tif,.tiff" multiple className="hidden" onChange={(e) => handleFileUpload(e, AnalysisMode.FOLDER)} />
-          </label>
-           <p className="text-xs text-slate-400 mt-2 italic text-center">*Upload pages as images (JPG, PNG, TIFF)</p>
-        </div>
-
-        {/* Google Drive Option */}
-        <div className="bg-white p-8 rounded-xl border border-slate-200 hover:border-indigo-500 shadow-sm hover:shadow-md transition-all flex flex-col items-center group relative overflow-hidden">
-          {/* Badge */}
-          <div className="absolute top-3 right-3 bg-yellow-100 text-yellow-800 text-[10px] font-bold px-2 py-1 rounded-full border border-yellow-200 uppercase tracking-wide">
-            Coming Soon
-          </div>
-
-          <div className="w-16 h-16 bg-indigo-50 rounded-full flex items-center justify-center mb-6 group-hover:scale-110 transition-transform">
-            <Cloud className="w-8 h-8 text-indigo-600" />
-          </div>
-          <h2 className="text-xl font-semibold mb-2">Google Drive</h2>
-          <p className="text-slate-500 text-sm text-center mb-6">Connect account to analyze files directly from Drive.</p>
-          
-          <button 
-             onClick={handleDriveConnect}
-             className="bg-indigo-600 hover:bg-indigo-700 text-white py-2 px-6 rounded-lg font-medium transition-colors shadow"
-          >
-             Connect & Select
-          </button>
-          
-          {/* Hidden input triggered after mock auth */}
-          <input 
-             id="drive-folder-input" 
-             type="file" 
-             accept="image/*,.tif,.tiff" 
-             multiple 
-             className="hidden" 
-             // @ts-ignore - webkitdirectory is standard but often missing in React types
-             webkitdirectory="" 
-             onChange={(e) => handleFileUpload(e, AnalysisMode.DRIVE)} 
-          />
-           <p className="text-xs text-slate-400 mt-2 italic text-center">*Supports selecting local Drive folders</p>
-        </div>
-
-      </div>
-    </div>
-  );
-
-  const renderConfig = () => (
-    <div className="min-h-screen bg-slate-50 text-slate-900 p-8 flex flex-col items-center relative">
-       <button 
-          onClick={() => setShowCredits(true)}
-          className="absolute top-6 right-6 p-2 text-slate-400 hover:text-blue-600 transition-colors"
-        >
-          <Info className="w-6 h-6" />
-      </button>
-
-      <div className="w-full max-w-2xl bg-white rounded-xl p-8 border border-slate-200 shadow-sm">
-        <h2 className="text-2xl font-bold mb-6 flex items-center gap-2">
-          <Settings className="w-6 h-6" /> Configuration
-        </h2>
-        
-        <div className="space-y-6">
-          <div>
-            <label className="block text-sm font-medium text-slate-500 mb-2">Project Title</label>
-            <input 
-              type="text"
-              value={projectTitle}
-              onChange={(e) => setProjectTitle(e.target.value)}
-              className="w-full bg-white border border-slate-300 rounded-lg px-4 py-3 text-slate-900 focus:ring-2 focus:ring-blue-500 outline-none"
-              placeholder="Enter Project Title"
-            />
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-slate-500 mb-2">Page Images</label>
-            <div className="p-3 bg-slate-50 rounded-lg border border-slate-200 text-lg font-mono">
-              {state.files.length} Pages
-            </div>
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-slate-500 mb-2">Execution Tier</label>
-            <div className="grid grid-cols-2 gap-4">
-              <button 
-                onClick={() => setState(s => ({...s, tier: Tier.FREE}))}
-                className={`p-4 rounded-lg border flex flex-col items-center transition-all ${state.tier === Tier.FREE ? 'bg-blue-50 border-blue-500 ring-1 ring-blue-500' : 'bg-white border-slate-200 hover:border-slate-400'}`}
-              >
-                <span className="font-bold text-slate-900">Trial / Free</span>
-                <span className="text-xs text-slate-500 text-center mt-1">Slower, strict quotas, auto-retry</span>
-              </button>
-              <button 
-                onClick={() => setState(s => ({...s, tier: Tier.PAID}))}
-                className={`p-4 rounded-lg border flex flex-col items-center transition-all ${state.tier === Tier.PAID ? 'bg-emerald-50 border-emerald-500 ring-1 ring-emerald-500' : 'bg-white border-slate-200 hover:border-slate-400'}`}
-              >
-                <span className="font-bold text-slate-900">Paying Track</span>
-                <span className="text-xs text-slate-500 text-center mt-1">Optimized concurrency, faster processing</span>
-              </button>
-            </div>
-            {state.tier === Tier.PAID && (
-               <a 
-                 href="https://ai.google.dev/gemini-api/docs/billing" 
-                 target="_blank" 
-                 rel="noopener noreferrer"
-                 className="mt-2 text-xs text-blue-600 hover:underline flex items-center gap-1 justify-center"
-               >
-                 View Google API Billing Documentation <ExternalLink className="w-3 h-3"/>
-               </a>
-            )}
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-slate-500 mb-2">Page Range (Optional)</label>
-            <div className="flex gap-4 items-center">
-              <input 
-                type="number" 
-                placeholder="Start" 
-                min="1"
-                max={state.files.length}
-                onChange={(e) => setPageRange(prev => ({ start: parseInt(e.target.value) || 1, end: prev?.end || state.files.length }))}
-                className="bg-white border border-slate-300 rounded-lg p-3 text-slate-900 w-full focus:ring-2 focus:ring-blue-500 outline-none"
-              />
-              <span className="text-slate-400">to</span>
-              <input 
-                type="number" 
-                placeholder="End" 
-                min="1"
-                max={state.files.length}
-                onChange={(e) => setPageRange(prev => ({ start: prev?.start || 1, end: parseInt(e.target.value) || state.files.length }))}
-                className="bg-white border border-slate-300 rounded-lg p-3 text-slate-900 w-full focus:ring-2 focus:ring-blue-500 outline-none"
-              />
-            </div>
-          </div>
-
-          <button 
-            onClick={() => downloadFile(generateFullJSON(projectTitle, state.tier, pageRange, state.files, state.clusters), `${projectTitle.replace(/[^a-z0-9]/gi, '_').toLowerCase()}_metadata.json`, 'application/json')}
-            className="w-full bg-white border border-slate-300 text-slate-700 hover:bg-slate-50 py-3 rounded-lg font-medium shadow-sm flex items-center justify-center gap-2 mt-4"
-          >
-            <Download className="w-5 h-5" /> Download Project Metadata
-          </button>
-
-          <button 
-            onClick={startAnalysis}
-            className="w-full bg-gradient-to-r from-blue-600 to-emerald-600 hover:from-blue-700 hover:to-emerald-700 text-white py-4 rounded-lg font-bold text-lg shadow-lg flex items-center justify-center gap-2 mt-4"
-          >
-            <Play className="w-5 h-5" /> Start Analysis
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-
-  const renderDashboard = () => {
-    const progressPercentage = state.processingStatus.total > 0 
-      ? Math.round((state.processingStatus.processed / state.processingStatus.total) * 100) 
-      : 0;
-      
-    // Collect unique values for filters
-    const availableLanguages = ["All", ...Array.from(new Set(state.files.map(f => f.language).filter(Boolean) as string[]))];
-    const availableModes = ["All", ...Array.from(new Set(state.files.map(f => f.productionMode).filter(Boolean) as string[]))];
-    
-    // Select All helpers for downloads
-    const allDownload = state.files.length > 0 && state.files.every(f => f.shouldDownloadImage);
-    const toggleAllDownload = () => setState(s => ({...s, files: s.files.map(f => ({...f, shouldDownloadImage: !allDownload}))}));
-
-
-    // Filter Logic
-    const filteredFiles = state.files.filter(f => {
-        const langMatch = filterLanguage === "All" || (f.language === filterLanguage);
-        const modeMatch = filterProductionMode === "All" || (f.productionMode === filterProductionMode);
-        return langMatch && modeMatch;
-    });
-
-    return (
-    <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col">
-      {/* Header */}
-      <div className="bg-white border-b border-slate-200 sticky top-0 z-20 shadow-sm flex flex-col">
-        <div className="p-4 flex justify-between items-center">
-          <div className="flex items-center gap-4">
-            <h1 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-600 to-emerald-600">ArchivalLens</h1>
-            <div className="flex items-center gap-2 px-3 py-1 bg-slate-100 rounded-full text-xs text-slate-500 border border-slate-200">
-              {state.processingStatus.isComplete ? <CheckCircle className="w-3 h-3 text-green-500"/> : <Loader2 className="w-3 h-3 animate-spin"/>}
-              <span className="font-medium">{state.processingStatus.currentStep}</span>
-              <span className="text-slate-400">|</span>
-              <span className="font-mono text-slate-700 font-bold">{progressPercentage}%</span>
-              <span className="text-slate-400 text-[10px]">({state.processingStatus.processed}/{state.processingStatus.total})</span>
-            </div>
-            <button onClick={() => setShowCredits(true)} className="text-slate-400 hover:text-blue-600 transition-colors ml-2" title="Credits">
-                <Info className="w-5 h-5" />
-            </button>
-          </div>
-          <div className="flex gap-3">
-            <button 
-              onClick={runTranscription}
-              className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg text-sm font-medium text-white shadow-sm transition-colors"
-            >
-              Run Transcription
-            </button>
-            <button 
-              onClick={runClustering}
-              className="flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 rounded-lg text-sm font-medium text-white shadow-sm transition-colors"
-            >
-              Generate Document Clusters
-            </button>
-             <button 
-              onClick={() => downloadFile(generateTSV(state.files), `${projectTitle.replace(/[^a-z0-9]/gi, '_').toLowerCase()}.tsv`, 'text/tab-separated-values')}
-              className="flex items-center gap-2 px-4 py-2 bg-white hover:bg-slate-50 rounded-lg text-sm border border-slate-300 text-slate-700 transition-colors shadow-sm"
-            >
-              <Download className="w-4 h-4" /> Export TSV
-            </button>
-          </div>
-        </div>
-
-        {/* Filters Toolbar */}
-        <div className="px-4 pb-3 flex gap-4 items-center border-t border-slate-100 pt-3 bg-slate-50/50">
-            <div className="flex items-center gap-2 text-sm text-slate-600">
-                <Filter className="w-4 h-4 text-slate-400" />
-                <span className="font-medium">Filters:</span>
-            </div>
-            
-            <div className="flex items-center gap-2">
-                <label className="text-xs text-slate-500">Language:</label>
-                <select 
-                   className="text-xs border border-slate-300 rounded px-2 py-1 bg-white focus:outline-none focus:ring-1 focus:ring-blue-500"
-                   value={filterLanguage}
-                   onChange={(e) => setFilterLanguage(e.target.value)}
-                >
-                    {availableLanguages.map(l => <option key={l} value={l}>{l}</option>)}
-                </select>
-            </div>
-
-            <div className="flex items-center gap-2">
-                <label className="text-xs text-slate-500">Production Mode:</label>
-                <select 
-                   className="text-xs border border-slate-300 rounded px-2 py-1 bg-white focus:outline-none focus:ring-1 focus:ring-blue-500"
-                   value={filterProductionMode}
-                   onChange={(e) => setFilterProductionMode(e.target.value)}
-                >
-                    {availableModes.map(m => <option key={m} value={m}>{m}</option>)}
-                </select>
-            </div>
-
-            {(filterLanguage !== "All" || filterProductionMode !== "All") && (
-                <button 
-                    onClick={() => { setFilterLanguage("All"); setFilterProductionMode("All"); }}
-                    className="text-xs text-blue-600 hover:underline ml-2"
-                >
-                    Clear Filters
-                </button>
-            )}
-            
-            <div className="flex-1 text-right text-xs text-slate-400">
-                Showing {filteredFiles.length} of {state.files.length} pages
-            </div>
-        </div>
-        
-        {/* Progress Bar */}
-        {state.processingStatus.total > 0 && (
-          <div className="w-full h-1.5 bg-slate-100">
-            <div 
-              className={`h-full transition-all duration-500 ease-out ${state.processingStatus.isComplete ? 'bg-emerald-500' : 'bg-gradient-to-r from-blue-500 to-blue-600'}`}
-              style={{ width: `${progressPercentage}%` }}
-            />
-          </div>
-        )}
-      </div>
-
-      {/* Grid */}
-      <div className="flex-1 overflow-auto p-4">
-        <div className="min-w-full inline-block align-middle">
-          <div className="border border-slate-200 rounded-lg overflow-hidden shadow-sm bg-white">
-            <table className="min-w-full divide-y divide-slate-200">
-              <thead className="bg-slate-50">
-                <tr>
-                  <th className="px-4 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider sticky left-0 bg-slate-50 z-10 border-r border-slate-200 shadow-[4px_0_8px_-4px_rgba(0,0,0,0.1)]">Index</th>
-                  <th className="px-4 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider">Preview</th>
-                  <th className="px-4 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider">Language</th>
-                  <th className="px-4 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider">Production Mode</th>
-                  <th className="px-4 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider w-96">Manual Entry</th>
-                  <th className="px-4 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider">
-                     <div className="flex flex-col gap-2">
-                         <div 
-                           className="flex items-center gap-1 cursor-pointer hover:text-blue-600 transition-colors"
-                           onClick={toggleAllTranscribe}
-                           title="Select All Transcribe"
-                         >
-                            {allTranscribe ? <CheckSquare className="w-3 h-3 text-blue-600" /> : <Square className="w-3 h-3" />}
-                            <span>Transcribe</span>
-                         </div>
-                         <div 
-                           className="flex items-center gap-1 cursor-pointer hover:text-blue-600 transition-colors"
-                           onClick={toggleAllTranslate}
-                           title="Select All Translate"
-                         >
-                            {allTranslate ? <CheckSquare className="w-3 h-3 text-blue-600" /> : <Square className="w-3 h-3" />}
-                            <span>Translate</span>
-                         </div>
-                         <div 
-                           className="flex items-center gap-1 cursor-pointer hover:text-blue-600 transition-colors"
-                           onClick={toggleAllDownload}
-                           title="Select All Download"
-                         >
-                            {allDownload ? <CheckSquare className="w-3 h-3 text-blue-600" /> : <Square className="w-3 h-3" />}
-                            <span>Download Images</span>
-                         </div>
-                     </div>
-                  </th>
-                </tr>
-              </thead>
-              <tbody className="bg-white divide-y divide-slate-100">
-                {filteredFiles.map((page) => {
-                  // Determine visual state for transcription
-                  const hasManual = !!page.manualTranscription;
-                  const hasAI = !!page.generatedTranscription;
-                  const hasContent = hasManual || hasAI;
-                  
-                  let borderColor = "border-slate-300";
-                  let bgColor = "bg-white";
-                  let badge = null;
-
-                  if (hasManual) {
-                    borderColor = "border-blue-300 focus:ring-blue-500 focus:border-blue-500";
-                    badge = <span className="text-[10px] text-blue-600 flex items-center gap-1"><Edit3 className="w-3 h-3"/> User Edited</span>;
-                  } else if (hasAI) {
-                    borderColor = "border-dashed border-emerald-300 focus:ring-emerald-500 focus:border-emerald-500";
-                    bgColor = "bg-emerald-50/20";
-                    badge = <span className="text-[10px] text-emerald-600 flex items-center gap-1"><Bot className="w-3 h-3"/> AI Draft</span>;
-                  }
-                  
-                  // Detect direction for description field
-                  const descDir = getTextDirection(page.manualDescription || "");
-
-                  return (
-                  <tr key={page.id} className="hover:bg-slate-50 transition-colors">
-                    <td className="px-4 py-4 whitespace-nowrap text-sm text-slate-700 font-mono sticky left-0 bg-white border-r border-slate-100">{page.indexName}</td>
-                    
-                    <td className="px-4 py-4 whitespace-nowrap">
-                      <div className="flex flex-col gap-2 items-center">
-                        {/* Enlarged Thumbnail w-40 h-40 (~25% larger than w-32) */}
-                        <div className="relative group w-40 h-40 cursor-pointer shadow-sm" onClick={() => setZoomedImage(page.previewUrl)}>
-                          <img src={page.previewUrl} alt="Preview" className="w-full h-full object-cover rounded-md border border-slate-200" />
-                          <div className="absolute inset-0 bg-black/20 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity rounded-md">
-                            <Maximize2 className="w-6 h-6 text-white drop-shadow-md" />
-                          </div>
-                        </div>
-                      </div>
-                    </td>
-
-                    <td className="px-4 py-4 text-sm text-slate-700">
-                      {page.status === 'analyzing' ? (
-                        <div className="text-blue-500 text-xs"><Loader2 className="w-4 h-4 animate-spin inline mr-1"/> Analyzing...</div>
-                      ) : (
-                        <span>{page.language || '-'}</span>
-                      )}
-                    </td>
-
-                    <td className="px-4 py-4 text-sm text-slate-700">
-                       <div className="flex flex-col items-start gap-1">
-                          <span className="truncate max-w-[150px]" title={page.productionMode}>{page.productionMode || '-'}</span>
-                          {page.hasHebrewHandwriting && (
-                            <div className="inline-flex items-center gap-1 px-2 py-0.5 bg-yellow-50 border border-yellow-200 text-yellow-700 rounded text-xs">
-                              <Flag className="w-3 h-3" /> Hebrew Handwritten
-                            </div>
-                          )}
-                       </div>
-                    </td>
-
-                    <td className="px-4 py-4 text-sm">
-                       <div className="space-y-3">
-                         <div className="relative group">
-                             <div className="flex justify-between items-center mb-1">
-                                <label className="block text-[10px] uppercase font-bold text-slate-400">Transcription</label>
-                                <div className="flex items-center gap-2">
-                                  {badge}
-                                  <label className="cursor-pointer text-slate-400 hover:text-blue-600" title="Upload Transcription (.txt)">
-                                    <FileUp className="w-3 h-3" />
-                                    <input 
-                                      type="file" 
-                                      accept=".txt" 
-                                      className="hidden" 
-                                      onChange={(e) => handleTranscriptionUpload(e, page.id)}
-                                    />
-                                  </label>
-                                </div>
-                             </div>
-                             <textarea 
-                               className={`w-full ${bgColor} border ${borderColor} rounded px-2 py-2 text-xs outline-none text-slate-900 min-h-[80px] resize-y transition-all`}
-                               placeholder="Transcription (Manual or Generated)"
-                               value={page.manualTranscription || page.generatedTranscription || ''}
-                               dir={getTextDirection(page.manualTranscription || page.generatedTranscription || '')}
-                               onChange={(e) => setState(s => ({...s, files: s.files.map(f => f.id === page.id ? {...f, manualTranscription: e.target.value} : f)}))}
-                             />
-                             <button 
-                                onClick={() => setExpandedField({pageId: page.id, field: 'manualTranscription', label: 'Transcription'})}
-                                className={`absolute ${hasContent ? 'bottom-2 right-2' : 'top-9 right-1'} px-3 py-1 bg-emerald-50 border border-emerald-200 text-emerald-600 rounded shadow-sm hover:bg-emerald-600 hover:text-white transition-all text-xs font-medium flex items-center gap-1 group/btn`}
-                                title="Open Workstation"
-                             >
-                                <Maximize2 className="w-3 h-3 group-hover/btn:text-white" />
-                                Open Editor
-                             </button>
-                         </div>
-
-                         <div className="relative group">
-                             <label className="block text-[10px] uppercase font-bold text-slate-400 mb-1">Description</label>
-                             <textarea 
-                               className="w-full bg-white border border-slate-300 rounded px-2 py-2 text-xs focus:ring-1 focus:ring-blue-500 focus:border-blue-500 outline-none text-slate-900 min-h-[60px] resize-y"
-                               placeholder="Manual Description..."
-                               value={page.manualDescription || ''}
-                               dir={descDir}
-                               onChange={(e) => setState(s => ({...s, files: s.files.map(f => f.id === page.id ? {...f, manualDescription: e.target.value} : f)}))}
-                             />
-                             <button 
-                                onClick={() => setExpandedField({pageId: page.id, field: 'manualDescription', label: 'Description'})}
-                                className="absolute top-7 right-1 px-3 py-1 bg-emerald-50 border border-emerald-200 text-emerald-600 rounded shadow-sm hover:bg-emerald-600 hover:text-white transition-all text-xs font-medium flex items-center gap-1 group/btn"
-                                title="Open Workstation"
-                             >
-                                <Maximize2 className="w-3 h-3 group-hover/btn:text-white" />
-                                Open Editor
-                             </button>
-                         </div>
-                       </div>
-                    </td>
-
-                    <td className="px-4 py-4 text-sm">
-                      <div className="flex flex-col gap-2">
-                        <label className="flex items-center gap-2 cursor-pointer select-none group">
-                          <input 
-                            type="checkbox" 
-                            className="rounded border-slate-300 text-blue-600 focus:ring-blue-500"
-                            checked={page.shouldTranscribe}
-                            onChange={(e) => setState(s => ({...s, files: s.files.map(f => f.id === page.id ? {...f, shouldTranscribe: e.target.checked} : f)}))}
-                          />
-                          <span className="text-xs text-slate-600 group-hover:text-blue-600 transition-colors">Transcribe</span>
-                        </label>
-                        <label className="flex items-center gap-2 cursor-pointer select-none group">
-                          <input 
-                            type="checkbox" 
-                            className="rounded border-slate-300 text-blue-600 focus:ring-blue-500"
-                            checked={page.shouldTranslate}
-                            onChange={(e) => setState(s => ({...s, files: s.files.map(f => f.id === page.id ? {...f, shouldTranslate: e.target.checked} : f)}))}
-                          />
-                          <span className="text-xs text-slate-600 group-hover:text-blue-600 transition-colors">Translate</span>
-                        </label>
-                        <label className="flex items-center gap-2 cursor-pointer select-none group">
-                          <input 
-                            type="checkbox" 
-                            className="rounded border-slate-300 text-blue-600 focus:ring-blue-500"
-                            checked={page.shouldDownloadImage}
-                            onChange={(e) => setState(s => ({...s, files: s.files.map(f => f.id === page.id ? {...f, shouldDownloadImage: e.target.checked} : f)}))}
-                          />
-                          <span className="text-xs text-slate-600 group-hover:text-blue-600 transition-colors">Download Images</span>
-                        </label>
-                      </div>
-                    </td>
-
-                  </tr>
-                )})}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-    </div>
-  )};
-
   const renderClustering = () => (
-    <div className="min-h-screen bg-slate-50 text-slate-900 p-8">
-      <div className="max-w-6xl mx-auto">
-        <div className="flex justify-between items-center mb-8">
-          <h2 className="text-3xl font-bold text-slate-800">Document Clusters</h2>
-          <div className="flex gap-4">
-            <button 
-              onClick={() => setState(s => ({...s, uiState: 'dashboard'}))}
-              className="px-4 py-2 border border-slate-300 rounded-lg hover:bg-slate-100 text-slate-700 bg-white shadow-sm"
-            >
-              Back to Dashboard
-            </button>
-            <button 
-              onClick={() => downloadFile(generateFullJSON(projectTitle, state.tier, pageRange, state.files, state.clusters), `${projectTitle.replace(/[^a-z0-9]/gi, '_').toLowerCase()}.json`, 'application/json')}
-              className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg font-medium flex items-center gap-2 text-white shadow-sm"
-            >
-              <Code className="w-4 h-4" /> Download JSON
-            </button>
-            <button 
-              onClick={() => downloadFile(generateClustersTSV(state.clusters), 'clusters.tsv', 'text/tab-separated-values')}
-              className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 rounded-lg font-medium flex items-center gap-2 text-white shadow-sm"
-            >
-              <Download className="w-4 h-4" /> Download TSV
-            </button>
-          </div>
-        </div>
-
-        <div className="grid grid-cols-1 gap-6">
-          {state.clusters.map(cluster => (
-            <div key={cluster.id} className="bg-white border border-slate-200 rounded-xl p-6 hover:border-blue-300 hover:shadow-md transition-all">
-              <div className="flex justify-between items-start mb-4">
-                <div>
-                  <h3 className="text-xl font-bold text-blue-600">{cluster.title} - {cluster.id}</h3>
-                  <div className="flex items-center gap-2 text-sm text-slate-500 mt-1">
-                      <span>Range: {cluster.pageRange}</span>
-                      {cluster.languages && cluster.languages.length > 0 && (
-                          <>
-                           <span>•</span>
-                           <span>{cluster.languages.join(", ")}</span>
-                          </>
-                      )}
-                  </div>
-                </div>
-                <span className="bg-slate-100 border border-slate-200 px-3 py-1 rounded-full text-xs text-slate-600">
-                  {cluster.pageIds.length} Pages
-                </span>
-              </div>
-              
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
-                 {/* Left: Summary & Core Data */}
-                 <div className="space-y-4">
-                    <div className="prose prose-slate max-w-none">
-                        <label className="text-xs font-bold text-slate-400 uppercase block mb-1">Summary</label>
-                        <textarea 
-                           className="w-full min-h-[100px] p-2 border border-slate-200 rounded bg-slate-50 text-sm text-slate-700 focus:ring-1 focus:ring-blue-500 outline-none resize-y"
-                           value={cluster.summary}
-                           dir={getTextDirection(cluster.summary)}
-                           onChange={(e) => setState(s => ({...s, clusters: s.clusters.map(c => c.id === cluster.id ? {...c, summary: e.target.value} : c)}))}
-                        />
+    <div className="flex-1 flex flex-col overflow-hidden bg-slate-50">
+      {renderCommonHeader(<button onClick={async () => { setState(s => ({ ...s, processingStatus: { total: state.files.length, processed: 0, currentStep: 'Running Gemini Cluster Analysis...', isComplete: false } })); try { const clusters = await clusterPages(state.files, state.tier); setState(s => ({ ...s, clusters, processingStatus: { ...s.processingStatus, isComplete: true } })); } catch (e) { alert("Clustering failed."); } }} className="bg-emerald-600 hover:bg-emerald-700 text-white px-5 py-2 rounded-xl text-xs font-black uppercase tracking-tight flex items-center gap-2 shadow-lg"><Sparkles className="w-4 h-4" /> AI Document Indexing</button>)}
+      <div className="flex-1 p-12 overflow-y-auto custom-scrollbar">
+        <div className="max-w-7xl mx-auto space-y-12">
+          <div className="flex justify-between items-end mb-8"><div><h2 className="text-4xl font-black text-slate-900 tracking-tighter uppercase italic">Clustered Documents</h2><p className="text-slate-400 font-bold text-sm mt-1">Cross-referencing content, handwriting, and temporal data</p></div></div>
+          {state.clusters.map(c => (
+            <div key={c.id} className="bg-white rounded-[40px] border border-slate-200 overflow-hidden shadow-sm hover:shadow-2xl transition-all p-12 group relative">
+              <button onClick={() => setEditingClusterId(c.id)} className="absolute top-12 right-12 p-3.5 bg-slate-50 text-slate-400 hover:bg-slate-900 hover:text-white rounded-2xl transition-all opacity-0 group-hover:opacity-100"><Edit3 className="w-5 h-5" /></button>
+              <div className="flex items-center gap-3 mb-8"><div className="bg-blue-600 text-white text-xs font-black px-5 py-1.5 rounded-full uppercase">Doc #{c.id}</div><div className="text-slate-300 font-black uppercase text-[10px] tracking-widest">{c.pageRange}</div></div>
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-16">
+                 <div className="lg:col-span-8 space-y-8"><h3 className="text-3xl font-black text-slate-800 leading-tight tracking-tight">{c.title}</h3><p className="text-slate-500 leading-relaxed text-base font-medium italic border-l-4 border-slate-100 pl-6">{c.summary}</p><div className="flex flex-wrap gap-2.5">{c.subjects?.map(s => renderBadge(s, 'subjects'))}</div></div>
+                 <div className="lg:col-span-4 bg-slate-50/50 rounded-[32px] p-8 border border-slate-100 space-y-6">
+                    <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest border-b pb-2">Research Metadata</h4>
+                    <div className="space-y-4">
+                        <div className="flex items-center gap-3 text-xs font-bold text-slate-700"><Calendar className="w-4 h-4 text-indigo-600" /> {c.standardizedDate || c.originalDate || 'Unidentified Date'}</div>
+                        <div className="flex items-center gap-3 text-xs font-bold text-slate-700"><MapPin className="w-4 h-4 text-red-500" /> {c.prisonName || 'Repository Unknown'}</div>
+                        <div className="flex items-center gap-3 text-xs font-bold text-slate-700"><FileText className="w-4 h-4 text-orange-500" /> {(c.docTypes || []).join(', ')}</div>
                     </div>
-                    
-                    <div className="grid grid-cols-2 gap-4 text-sm">
-                        {cluster.originalDate && (
-                           <div>
-                              <label className="text-[10px] font-bold text-slate-400 uppercase flex items-center gap-1"><Calendar className="w-3 h-3"/> Original Date</label>
-                              <div className="text-slate-800">{cluster.originalDate}</div>
-                           </div>
-                        )}
-                        {cluster.standardizedDate && (
-                           <div>
-                              <label className="text-[10px] font-bold text-slate-400 uppercase flex items-center gap-1"><Calendar className="w-3 h-3"/> Std. Date</label>
-                              <div className="text-slate-800">{cluster.standardizedDate}</div>
-                           </div>
-                        )}
-                        {cluster.prisonName && (
-                           <div className="col-span-2">
-                              <label className="text-[10px] font-bold text-red-400 uppercase flex items-center gap-1"><Building className="w-3 h-3"/> Prison Mentioned</label>
-                              <div className="text-red-700 font-medium">{cluster.prisonName}</div>
-                           </div>
-                        )}
-                        {cluster.sender && (
-                           <div>
-                              <label className="text-[10px] font-bold text-slate-400 uppercase flex items-center gap-1"><User className="w-3 h-3"/> From</label>
-                              <div className="text-slate-800">{cluster.sender}</div>
-                           </div>
-                        )}
-                        {cluster.recipient && (
-                           <div>
-                              <label className="text-[10px] font-bold text-slate-400 uppercase flex items-center gap-1"><Mail className="w-3 h-3"/> To</label>
-                              <div className="text-slate-800">{cluster.recipient}</div>
-                           </div>
-                        )}
-                    </div>
-                 </div>
-                 
-                 {/* Right: Entities */}
-                 <div className="bg-slate-50 rounded-lg p-4 border border-slate-100 space-y-4 text-center">
-                    <h4 className="text-xs font-bold text-slate-500 uppercase border-b border-slate-200 pb-2">Detected Entities</h4>
-                    
-                    <div>
-                        <div className="flex items-center justify-center gap-2 text-xs font-semibold text-blue-600 mb-1"><Users className="w-3 h-3"/> People</div>
-                        <textarea
-                            className="w-full p-2 text-xs border border-slate-200 rounded text-center focus:ring-1 focus:ring-blue-500 outline-none resize-none bg-white"
-                            rows={2}
-                            value={(cluster.entities?.people || []).join(", ")}
-                            dir={getTextDirection((cluster.entities?.people || []).join(", "))}
-                            onChange={(e) => {
-                                const newPeople = e.target.value.split(",").map(s => s.trim()).filter(Boolean);
-                                setState(s => ({...s, clusters: s.clusters.map(c => c.id === cluster.id ? {...c, entities: {...(c.entities || {places:[], organizations:[]}), people: newPeople}} : c)}));
-                            }}
-                            placeholder="Name 1, Name 2..."
-                        />
-                    </div>
-
-                    <div>
-                        <div className="flex items-center justify-center gap-2 text-xs font-semibold text-emerald-600 mb-1"><MapPin className="w-3 h-3"/> Places</div>
-                        <textarea
-                            className="w-full p-2 text-xs border border-slate-200 rounded text-center focus:ring-1 focus:ring-emerald-500 outline-none resize-none bg-white"
-                            rows={2}
-                            value={(cluster.entities?.places || []).join(", ")}
-                            dir={getTextDirection((cluster.entities?.places || []).join(", "))}
-                            onChange={(e) => {
-                                const newPlaces = e.target.value.split(",").map(s => s.trim()).filter(Boolean);
-                                setState(s => ({...s, clusters: s.clusters.map(c => c.id === cluster.id ? {...c, entities: {...(c.entities || {people:[], organizations:[]}), places: newPlaces}} : c)}));
-                            }}
-                            placeholder="Place 1, Place 2..."
-                        />
-                    </div>
-
-                    <div>
-                        <div className="flex items-center justify-center gap-2 text-xs font-semibold text-purple-600 mb-1"><Building className="w-3 h-3"/> Organizations</div>
-                        <textarea
-                            className="w-full p-2 text-xs border border-slate-200 rounded text-center focus:ring-1 focus:ring-purple-500 outline-none resize-none bg-white"
-                            rows={2}
-                            value={(cluster.entities?.organizations || []).join(", ")}
-                            dir={getTextDirection((cluster.entities?.organizations || []).join(", "))}
-                            onChange={(e) => {
-                                const newOrgs = e.target.value.split(",").map(s => s.trim()).filter(Boolean);
-                                setState(s => ({...s, clusters: s.clusters.map(c => c.id === cluster.id ? {...c, entities: {...(c.entities || {people:[], places:[]}), organizations: newOrgs}} : c)}));
-                            }}
-                            placeholder="Org 1, Org 2..."
-                        />
+                    <div className="space-y-6 pt-4 border-t">
+                      <div><div className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-slate-400 mb-3"><User className="w-3 h-3" /> Senders</div><div className="space-y-3">{c.senders?.length ? c.senders.map((s, idx) => (<div key={idx} className="flex flex-col pl-6 relative"><div className={`absolute left-1.5 top-1.5 w-1.5 h-1.5 rounded-full ${s.id ? 'bg-indigo-600' : 'bg-emerald-400'}`} /><div className="text-xs font-bold text-slate-800">{s.name}</div>{s.role && <div className="text-[9px] font-bold text-slate-400 italic mt-0.5 uppercase">{s.role}</div>}</div>)) : <div className="text-[10px] text-slate-300 italic pl-6">Unidentified</div>}</div></div>
+                      <div><div className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-slate-400 mb-3"><Mail className="w-3 h-3" /> Recipients</div><div className="space-y-3">{c.recipients?.length ? c.recipients.map((r, idx) => (<div key={idx} className="flex flex-col pl-6 relative"><div className={`absolute left-1.5 top-1.5 w-1.5 h-1.5 rounded-full ${r.id ? 'bg-indigo-600' : 'bg-purple-400'}`} /><div className="text-xs font-bold text-slate-800">{r.name}</div>{r.role && <div className="text-[9px] font-bold text-slate-400 italic mt-0.5 uppercase">{r.role}</div>}</div>)) : <div className="text-[10px] text-slate-300 italic pl-6">Unidentified</div>}</div></div>
                     </div>
                  </div>
               </div>
-
-              <div className="mt-6 flex gap-2 overflow-x-auto pb-2 scrollbar-thin scrollbar-thumb-slate-300">
-                {cluster.pageIds.map(pid => {
-                    const page = state.files.find(f => f.id === pid);
-                    if(!page) return null;
-                    return (
-                        <div 
-                          key={pid} 
-                          className="min-w-[80px] w-20 h-20 relative rounded-md overflow-hidden border border-slate-200 shrink-0 cursor-pointer hover:ring-2 hover:ring-blue-500 transition-all"
-                          onClick={() => setZoomedImage(page.previewUrl)}
-                        >
-                            <img src={page.previewUrl} className="w-full h-full object-cover" />
-                        </div>
-                    )
-                })}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-10 mt-12 pt-12 border-t">
+                 <div><h4 className="flex items-center gap-2 text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] mb-5"><Users className="w-4 h-4 text-blue-500" /> People</h4><div className="flex flex-wrap gap-2">{c.entities?.people?.map(p => renderBadge(p, 'people'))}</div></div>
+                 <div><h4 className="flex items-center gap-2 text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] mb-5"><Building className="w-4 h-4 text-purple-500" /> Organizations</h4><div className="flex flex-wrap gap-2">{c.entities?.organizations?.map(o => renderBadge(o, 'orgs'))}</div></div>
+                 <div><h4 className="flex items-center gap-2 text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] mb-5"><RoleIcon className="w-4 h-4 text-orange-500" /> Roles</h4><div className="flex flex-wrap gap-2">{c.entities?.roles?.map(r => renderBadge(r, 'roles'))}</div></div>
+              </div>
+              <div className="mt-12 flex gap-4 overflow-x-auto pb-4 custom-scrollbar">
+                 {c.pageIds.map(pid => { const p = state.files.find(f => f.id === pid); return p ? <div key={pid} className="relative group/img shrink-0"><img src={p.previewUrl} className="h-32 w-24 object-cover rounded-xl border border-slate-200 cursor-zoom-in hover:scale-105 transition-all shadow-sm" onClick={() => setZoomedPageId(p.id)} /></div> : null; })}
               </div>
             </div>
           ))}
         </div>
       </div>
+      {editingClusterId && <ClusterEditor cluster={state.clusters.find(c => c.id === editingClusterId)!} onClose={() => setEditingClusterId(null)} />}
     </div>
   );
 
-  const renderExpandedEditor = () => {
-    if (!expandedField) return null;
-    const page = state.files.find(f => f.id === expandedField.pageId);
-    if (!page) return null;
-
-    const transcriptionText = page.manualTranscription !== undefined ? page.manualTranscription : page.generatedTranscription;
-    const dir = getTextDirection(transcriptionText || "");
-    const descDir = getTextDirection(page.manualDescription || "");
-
+  const renderDashboard = () => {
+    const isAnalysisActive = !state.processingStatus.isComplete && state.processingStatus.currentStep.includes('Analyzing');
+    const isTranscribingActive = !state.processingStatus.isComplete && state.processingStatus.currentStep.includes('OCR');
+    const isBatchActive = isAnalysisActive || isTranscribingActive;
     return (
-        <div className="fixed inset-0 z-50 bg-slate-900/90 flex items-center justify-center p-4 backdrop-blur-md">
-            <div className="bg-white w-full max-w-[95vw] h-[95vh] rounded-xl shadow-2xl flex flex-col overflow-hidden">
-                {/* Header */}
-                <div className="flex justify-between items-center p-4 border-b border-slate-200 bg-white z-10">
+      <div className="flex-1 flex flex-col overflow-hidden bg-slate-50">
+        {renderCommonHeader(
+          <button onClick={() => {
+              const toProc = state.files.filter(f => f.shouldTranscribe || f.shouldTranslate);
+              if (toProc.length === 0) { alert("Select pages first."); return; }
+              setState(s => ({ ...s, processingStatus: { total: toProc.length, processed: 0, currentStep: 'Gemini OCR Pipeline...', isComplete: false } }));
+              (async () => {
+                const concurrency = state.tier === Tier.PAID ? 5 : 1;
+                for (let i = 0; i < toProc.length; i += concurrency) {
+                  await Promise.all(toProc.slice(i, i + concurrency).map(async (p) => {
+                    setState(prev => ({ ...prev, files: prev.files.map(f => f.id === p.id ? { ...f, status: 'transcribing' } : f) }));
+                    const res = await transcribeAndTranslatePage(p, state.tier);
+                    setState(prev => ({ ...prev, files: prev.files.map(f => f.id === p.id ? { ...f, ...res, manualTranscription: (!f.manualTranscription || f.manualTranscription === "") ? res.generatedTranscription : f.manualTranscription, manualDescription: (!f.manualDescription || f.manualDescription === "") ? res.generatedTranslation : f.manualDescription } : f), processingStatus: { ...prev.processingStatus, processed: prev.processingStatus.processed + 1 } }));
+                  }));
+                }
+                setState(prev => ({ ...prev, processingStatus: { ...prev.processingStatus, isComplete: true } }));
+              })();
+            }} disabled={isBatchActive} className={`px-6 py-2.5 rounded-2xl text-xs font-black uppercase tracking-widest flex items-center gap-2 shadow-xl active:scale-95 transition-all border-b-4 ${isBatchActive ? 'bg-slate-300 text-slate-500 border-slate-400 grayscale' : 'bg-blue-600 hover:bg-blue-700 text-white border-blue-800'}`}>{isTranscribingActive ? <Loader2 className="w-4 h-4 animate-spin" /> : <Bot className="w-4 h-4" />} Transcribe</button>
+        )}
+        <div className="flex-1 overflow-auto p-8 custom-scrollbar">
+          <div className="max-w-[1500px] mx-auto space-y-6">
+            <div className="flex flex-col md:flex-row justify-between items-center gap-6"><div className="relative flex-1 w-full"><Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" /><input type="text" value={searchTerm} onChange={e => setSearchTerm(e.target.value)} placeholder="Filter pages..." className="w-full bg-white border border-slate-200 rounded-2xl py-3 pl-12 pr-4 text-sm font-medium outline-none" /></div><div className="flex items-center gap-4 shrink-0"><div className="flex items-center gap-2 bg-slate-200/50 p-1.5 rounded-2xl border border-slate-200"><span className="text-[10px] font-black uppercase text-slate-400 px-2 tracking-widest">OCR:</span><button onClick={() => setState(s => ({ ...s, files: s.files.map(f => ({ ...f, shouldTranscribe: true })) }))} className="px-3 py-1.5 bg-white border rounded-xl text-[10px] font-black uppercase text-slate-500">All</button><button onClick={() => setState(s => ({ ...s, files: s.files.map(f => ({ ...f, shouldTranscribe: false })) }))} className="px-3 py-1.5 bg-white border rounded-xl text-[10px] font-black uppercase text-slate-500">None</button></div><div className="flex items-center gap-2 bg-slate-200/50 p-1.5 rounded-2xl border border-slate-200"><span className="text-[10px] font-black uppercase text-slate-400 px-2 tracking-widest">EN:</span><button onClick={() => setState(s => ({ ...s, files: s.files.map(f => ({ ...f, shouldTranslate: true })) }))} className="px-3 py-1.5 bg-white border rounded-xl text-[10px] font-black uppercase text-slate-500">All</button><button onClick={() => setState(s => ({ ...s, files: s.files.map(f => ({ ...f, shouldTranslate: false })) }))} className="px-3 py-1.5 bg-white border rounded-xl text-[10px] font-black uppercase text-slate-500">None</button></div></div></div>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-8">
+              {filteredPages.map(page => (
+                <div key={page.id} className="bg-white rounded-[32px] border border-slate-200 overflow-hidden group hover:border-blue-500 hover:shadow-2xl transition-all flex flex-col shadow-sm">
+                  <div className="relative aspect-[4/5] overflow-hidden bg-slate-100 cursor-zoom-in" onClick={() => setZoomedPageId(page.id)}><img src={page.previewUrl} alt={page.indexName} className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-110" style={{ transform: `rotate(${page.rotation || 0}deg)` }} /><div className="absolute top-4 left-4 flex flex-col gap-2"><div className="bg-white/95 backdrop-blur-sm px-3 py-1.5 rounded-xl text-[10px] font-black text-slate-800 shadow-xl uppercase tracking-tighter">{page.indexName.split('-').pop()?.trim()}</div>{page.hasHebrewHandwriting && <div className="bg-amber-500 px-3 py-1.5 rounded-xl text-[10px] font-black text-white shadow-xl flex items-center gap-1.5 uppercase tracking-tighter"><Flag className="w-3 h-3" /> HBW</div>}</div><div className="absolute top-4 right-4">{renderConfidence(page.confidenceScore)}</div><div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 transition-opacity flex gap-2"><button onClick={(e) => { e.stopPropagation(); setState(s => ({ ...s, files: s.files.map(f => f.id === page.id ? { ...f, rotation: ((f.rotation || 0) - 90 + 360) % 360 } : f) })); }} className="p-3 bg-white rounded-2xl shadow-2xl hover:bg-slate-900 hover:text-white transition-all"><RotateCcw className="w-5 h-5" /></button><button onClick={(e) => { e.stopPropagation(); setState(s => ({ ...s, files: s.files.map(f => f.id === page.id ? { ...f, rotation: ((f.rotation || 0) + 90) % 360 } : f) })); }} className="p-3 bg-white rounded-2xl shadow-2xl hover:bg-slate-900 hover:text-white transition-all"><RotateCw className="w-5 h-5" /></button></div></div>
+                  <div className="p-6 flex-1 flex flex-col gap-5">
                     <div>
-                        <h3 className="font-bold text-lg text-slate-800">Transcription Workstation</h3>
-                        <h4 className="text-sm text-slate-500">{page.indexName}</h4>
+                      <h4 className="font-black text-slate-800 truncate text-sm tracking-tight mb-1">{page.indexName}</h4>
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="text-[10px] text-slate-400 font-mono truncate flex-1">{page.fileName}</p>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          {page.productionMode && (
+                            <span className="text-[8px] font-black uppercase tracking-widest text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-100" title="Production Mode">
+                              {page.productionMode}
+                            </span>
+                          )}
+                          <span className="text-[8px] font-black uppercase tracking-widest text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded border border-blue-100" title="Detected Language">
+                            {page.language || '...'}
+                          </span>
+                        </div>
+                      </div>
                     </div>
-                    <button onClick={() => { setExpandedField(null); }} className="p-2 hover:bg-slate-100 rounded-full text-slate-500 transition-colors">
-                        <X className="w-6 h-6" />
-                    </button>
+                    <div className="flex flex-wrap gap-1.5 min-h-[1.5rem]">{page.entities?.people?.slice(0, 3).map(p => renderBadge(p, 'people'))}</div>
+                    <div className="mt-auto pt-5 border-t flex flex-col gap-4">
+                      <div className="flex items-center justify-between"><label className="flex items-center gap-2 cursor-pointer select-none group/cb"><div className={`w-5 h-5 rounded-lg border flex items-center justify-center transition-all ${page.shouldTranscribe ? 'bg-blue-600 border-blue-600' : 'bg-white border-slate-300'}`}>{page.shouldTranscribe && <CheckSquare className="w-4 h-4 text-white" />}</div><input type="checkbox" className="hidden" checked={page.shouldTranscribe} onChange={e => setState(s => ({ ...s, files: s.files.map(f => f.id === page.id ? { ...f, shouldTranscribe: e.target.checked } : f) }))} /><span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">OCR</span></label><label className="flex items-center gap-2 cursor-pointer select-none group/cb"><div className={`w-5 h-5 rounded-lg border flex items-center justify-center transition-all ${page.shouldTranslate ? 'bg-emerald-600 border-emerald-600' : 'bg-white border-slate-300'}`}>{page.shouldTranslate && <CheckSquare className="w-4 h-4 text-white" />}</div><input type="checkbox" className="hidden" checked={page.shouldTranslate} onChange={e => setState(s => ({ ...s, files: s.files.map(f => f.id === page.id ? { ...f, shouldTranslate: e.target.checked } : f) }))} /><span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">EN</span></label></div>
+                      <div className="flex gap-2"><button onClick={() => setExpandedField({ pageId: page.id, field: 'manualTranscription', label: 'Transcription Editor' })} className="flex-1 py-2 rounded-xl bg-slate-50 text-[10px] font-black uppercase text-slate-600 hover:bg-slate-900 hover:text-white transition-all border shadow-sm flex items-center justify-center gap-2"><Edit3 className="w-3.5 h-3.5" /> OCR</button><button onClick={() => setExpandedField({ pageId: page.id, field: 'manualDescription', label: 'Notes' })} className="flex-1 py-2 rounded-xl bg-slate-50 text-[10px] font-black uppercase text-slate-600 hover:bg-slate-900 hover:text-white transition-all border shadow-sm flex items-center justify-center gap-2"><StickyNote className="w-3.5 h-3.5" /> Notes</button></div>
+                      {page.status === 'transcribing' && <div className="h-1 bg-slate-100 rounded-full overflow-hidden"><div className="h-full bg-blue-500 animate-pulse" style={{ width: '100%' }} /></div>}
+                      {page.status === 'error' && <div className="text-[9px] font-black text-red-500 uppercase flex items-center gap-1 justify-center"><AlertTriangle className="w-3 h-3" /> Error</div>}
+                    </div>
+                  </div>
                 </div>
-
-                {/* Split Content */}
-                <div className="flex-1 flex flex-col md:flex-row overflow-hidden">
-                    {/* Left Panel: Image (Expanded to 60%) */}
-                    <div className="w-full md:w-3/5 bg-slate-100 p-4 relative overflow-hidden flex flex-col">
-                        <div className="absolute top-4 left-4 z-20 flex gap-2 bg-white/90 rounded-lg p-1 shadow-sm backdrop-blur-sm">
-                           <button onClick={() => setImageZoom(z => Math.max(0.5, z - 0.25))} className="p-1.5 hover:bg-slate-100 rounded text-slate-600"><ZoomOut className="w-4 h-4"/></button>
-                           <span className="text-xs font-mono flex items-center w-8 justify-center">{Math.round(imageZoom * 100)}%</span>
-                           <button onClick={() => setImageZoom(z => Math.min(3, z + 0.25))} className="p-1.5 hover:bg-slate-100 rounded text-slate-600"><ZoomIn className="w-4 h-4"/></button>
-                        </div>
-                        <div className="flex-1 overflow-auto flex items-center justify-center border-r border-slate-200">
-                          <img 
-                            src={page.previewUrl} 
-                            className="max-w-none shadow-lg rounded-sm transition-transform duration-200 ease-out" 
-                            style={{ 
-                              transform: `scale(${imageZoom})`, 
-                              transformOrigin: 'center center',
-                              maxHeight: imageZoom === 1 ? '100%' : 'auto', 
-                              maxWidth: imageZoom === 1 ? '100%' : 'auto' 
-                            }} 
-                          />
-                        </div>
-                    </div>
-
-                    {/* Right Panel: Inputs (Reduced to 40%) */}
-                    <div className="w-full md:w-2/5 flex flex-col bg-white">
-                        <div className="flex-1 p-6 overflow-y-auto space-y-6">
-                            
-                            <div className="space-y-2">
-                                <div className="flex justify-between items-center">
-                                    <label className="flex items-center gap-2 text-sm font-bold text-slate-700 uppercase tracking-wide">
-                                        <FileText className="w-4 h-4 text-blue-600"/> 
-                                        Manual Transcription
-                                    </label>
-                                    <div className="flex items-center gap-2">
-                                        <div className="flex items-center gap-1 bg-slate-100 rounded p-1 mr-2">
-                                           <Type className="w-3 h-3 text-slate-500"/>
-                                           <input 
-                                             type="range" min="10" max="24" step="1" 
-                                             value={editorFontSize}
-                                             onChange={(e) => setEditorFontSize(parseInt(e.target.value))}
-                                             className="w-16 h-1 bg-slate-300 rounded-lg appearance-none cursor-pointer"
-                                           />
-                                        </div>
-                                    </div>
-                                </div>
-                                
-                                <textarea
-                                    className="w-full h-64 p-4 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none resize-none text-slate-800 font-mono leading-relaxed shadow-sm transition-all"
-                                    style={{ fontSize: `${editorFontSize}px` }}
-                                    dir={dir}
-                                    value={transcriptionText || ''}
-                                    onChange={(e) => setState(s => ({...s, files: s.files.map(f => f.id === page.id ? {...f, manualTranscription: e.target.value} : f)}))}
-                                    placeholder="Type transcription here..."
-                                    autoFocus={expandedField.field === 'manualTranscription'}
-                                />
-
-                                {page.generatedTranscription && !page.manualTranscription && (
-                                   <div className="text-xs text-slate-500 italic text-right">Auto-filled from AI</div>
-                                )}
-                            </div>
-                            
-                            <div className="space-y-2 pt-2 border-t border-slate-100">
-                                <label className="flex items-center gap-2 text-sm font-bold text-slate-700 uppercase tracking-wide">
-                                    <Flag className="w-4 h-4 text-emerald-600"/> 
-                                    Description / Notes
-                                </label>
-                                <textarea
-                                    className="w-full h-24 p-4 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none resize-none text-slate-800 text-sm leading-relaxed shadow-sm transition-all"
-                                    value={page.manualDescription || ''}
-                                    dir={descDir}
-                                    onChange={(e) => setState(s => ({...s, files: s.files.map(f => f.id === page.id ? {...f, manualDescription: e.target.value} : f)}))}
-                                    placeholder="Enter description or notes..."
-                                    autoFocus={expandedField.field === 'manualDescription'}
-                                />
-                            </div>
-
-                            {/* Read-only Translation Area */}
-                            {page.generatedTranslation && (
-                                <div className="space-y-2 pt-2 border-t border-slate-100">
-                                    <label className="flex items-center gap-2 text-sm font-bold text-slate-700 uppercase tracking-wide">
-                                        <Languages className="w-4 h-4 text-purple-600"/> 
-                                        Generated Translation
-                                    </label>
-                                    <div className="w-full h-24 p-4 bg-slate-50 border border-slate-200 rounded-lg text-slate-700 text-sm overflow-y-auto">
-                                        {page.generatedTranslation}
-                                    </div>
-                                </div>
-                            )}
-
-                        </div>
-                        
-                        <div className="p-4 border-t border-slate-100 bg-slate-50 flex justify-end gap-3">
-                             <button 
-                                onClick={() => { setExpandedField(null); }}
-                                className="px-6 py-2 bg-slate-800 hover:bg-slate-900 text-white rounded-lg font-medium shadow-md transition-all transform active:scale-95"
-                             >
-                                Save & Close
-                             </button>
-                        </div>
-                    </div>
-                </div>
+              ))}
             </div>
+          </div>
         </div>
-    )
-  }
+      </div>
+    );
+  };
+
+  const renderEntityExplorer = () => (
+    <div className="flex-1 flex flex-col overflow-hidden bg-slate-50">
+      {renderCommonHeader()}
+      <div className="flex-1 flex overflow-hidden">
+        <div className="w-1/2 overflow-auto p-12 custom-scrollbar bg-white border-r">
+          <div className="mb-12"><h2 className="text-4xl font-black text-slate-900 tracking-tighter uppercase italic">Research Map</h2><p className="text-slate-400 font-bold text-sm mt-1">Cross-referencing entities across docs</p></div>
+          <div className="space-y-12">
+             <section><h3 className="text-xs font-black text-slate-400 uppercase tracking-[0.3em] mb-6 flex items-center gap-2"><UserCheck className="w-4 h-4 text-blue-500" /> People ({allEntities.people.length})</h3><div className="grid grid-cols-1 gap-3">{allEntities.people.sort((a,b) => b.ids.length - a.ids.length).map(p => (<div key={p.name} onClick={() => setSelectedEntity({name: p.name, type: 'person'})} className={`flex items-center justify-between p-4 rounded-2xl border cursor-pointer ${selectedEntity?.name === p.name ? 'bg-blue-600 border-blue-600 text-white shadow-xl shadow-blue-200' : 'bg-slate-50 border-slate-100 hover:bg-slate-100'}`}><div className="flex items-center gap-3"><div className={`w-8 h-8 rounded-full flex items-center justify-center font-black text-xs ${selectedEntity?.name === p.name ? 'bg-white/20' : 'bg-blue-100 text-blue-600'}`}>{p.name[0]}</div><span className="font-bold text-sm">{p.name}</span></div><div className="flex items-center gap-2"><span className={`text-[10px] font-black uppercase tracking-widest ${selectedEntity?.name === p.name ? 'text-blue-100' : 'text-slate-400'}`}>{p.ids.length} docs</span><ChevronRight className={`w-4 h-4 transition-transform ${selectedEntity?.name === p.name ? 'rotate-90' : ''}`} /></div></div>))}</div></section>
+             <section><h3 className="text-xs font-black text-slate-400 uppercase tracking-[0.3em] mb-6 flex items-center gap-2"><RoleIcon className="w-4 h-4 text-orange-500" /> Roles ({allEntities.roles.length})</h3><div className="grid grid-cols-1 gap-3">{allEntities.roles.sort((a,b) => b.ids.length - a.ids.length).map(r => (<div key={r.name} onClick={() => setSelectedEntity({name: r.name, type: 'role'})} className={`flex items-center justify-between p-4 rounded-2xl border cursor-pointer ${selectedEntity?.name === r.name ? 'bg-orange-600 border-orange-600 text-white shadow-xl shadow-orange-200' : 'bg-slate-50 border-slate-100 hover:bg-slate-100'}`}><div className="flex items-center gap-3"><div className={`w-8 h-8 rounded-full flex items-center justify-center font-black text-xs ${selectedEntity?.name === r.name ? 'bg-white/20' : 'bg-orange-100 text-orange-600'}`}><RoleIcon className="w-4 h-4" /></div><span className="font-bold text-sm">{r.name}</span></div><div className="flex items-center gap-2"><span className={`text-[10px] font-black uppercase tracking-widest ${selectedEntity?.name === r.name ? 'text-orange-100' : 'text-slate-400'}`}>{r.ids.length} docs</span><ChevronRight className={`w-4 h-4 transition-transform ${selectedEntity?.name === r.name ? 'rotate-90' : ''}`} /></div></div>))}</div></section>
+          </div>
+        </div>
+        <div className="w-1/2 flex items-center justify-center p-12 text-center bg-slate-50/50">
+           {selectedEntity ? (
+             <div className="w-full max-w-lg space-y-8 animate-in slide-in-from-right-4 duration-300">
+                <div className="space-y-2"><div className={`w-20 h-20 rounded-3xl flex items-center justify-center text-3xl font-black mx-auto shadow-xl ${selectedEntity.type === 'person' ? 'bg-blue-600 text-white' : 'bg-orange-600 text-white'}`}>{selectedEntity.type === 'person' ? <User className="w-10 h-10" /> : <RoleIcon className="w-10 h-10" />}</div><h3 className="text-3xl font-black text-slate-900 tracking-tight">{selectedEntity.name}</h3></div>
+                <div className="space-y-4"><h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Appearances</h4><div className="grid grid-cols-1 gap-2">{(allEntities.people.find(p => p.name === selectedEntity.name)?.ids || allEntities.roles.find(r => r.name === selectedEntity.name)?.ids || []).map((id, i) => (<div key={i} className="bg-white p-4 rounded-xl border border-slate-200 text-left font-bold text-sm text-slate-700 flex items-center justify-between group hover:border-blue-500 transition-all cursor-pointer"><span>{id}</span><ExternalLink className="w-4 h-4 text-slate-300 group-hover:text-blue-500" /></div>))}</div></div>
+             </div>
+           ) : (
+             <div><Users className="w-16 h-16 mx-auto mb-4 opacity-20" /><h3 className="text-xl font-black text-slate-800 tracking-tight">Select Pivot</h3><p className="text-sm font-medium mt-1 text-slate-400">Map connections landscape</p></div>
+           )}
+        </div>
+      </div>
+    </div>
+  );
 
   return (
-    <>
-      {state.uiState === 'welcome' && renderWelcome()}
-      {state.uiState === 'config' && renderConfig()}
-      {state.uiState === 'dashboard' && renderDashboard()}
-      {state.uiState === 'clustering' && renderClustering()}
-      {renderExpandedEditor()}
-      {renderCreditsModal()}
+    <div className="flex h-screen w-full bg-slate-50 font-sans selection:bg-blue-100">
+      {state.uiState === 'welcome' ? renderWelcome() : (
+        <>
+          <aside className={`bg-white border-r flex flex-col transition-all duration-300 ${isSidebarOpen ? 'w-80' : 'w-0 overflow-hidden border-none'}`}>
+            <div className="p-6 border-b flex items-center justify-between shrink-0"><div className="flex items-center gap-2"><div className="w-8 h-8 bg-slate-900 rounded-lg flex items-center justify-center"><Sparkles className="w-5 h-5 text-white" /></div><span className="font-black italic uppercase tracking-tighter text-xl">Archival Lens</span></div><button onClick={() => setIsSidebarOpen(false)} className="p-1 hover:bg-slate-100 rounded-lg"><PanelLeft className="w-4 h-4 text-slate-400" /></button></div>
+            <div className="flex-1 overflow-y-auto p-6 space-y-8 custom-scrollbar">
+              <div className="space-y-4"><h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Active Stack</h4><div className="bg-slate-50 p-5 rounded-3xl border shadow-inner"><div className="text-sm font-black text-slate-800 leading-tight mb-1">{projectTitle}</div><div className="text-[10px] font-bold text-slate-400 uppercase truncate">{archiveName || 'Repository Unassigned'}</div></div></div>
+              <div className="space-y-6"><h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Pivots</h4><div className="space-y-4"><div className="space-y-1"><label className="text-[9px] font-bold text-slate-400 uppercase">Lang</label><select value={filterLanguage} onChange={e => setFilterLanguage(e.target.value)} className="w-full bg-slate-50 border rounded-xl px-3 py-2 text-xs font-bold"><option value="All">All</option>{Array.from(new Set(state.files.map(f => f.language).filter(Boolean))).map(l => <option key={l} value={l}>{l}</option>)}</select></div></div></div>
+            </div>
+            <div className="p-6 border-t bg-slate-50/50"><button onClick={() => setState(s => ({ ...s, uiState: 'welcome' }))} className="w-full flex items-center justify-center gap-2 text-[10px] font-black uppercase tracking-widest text-slate-400 hover:text-red-500 transition-colors py-2"><X className="w-3.5 h-3.5" /> Close</button></div>
+          </aside>
+          {!isSidebarOpen && <button onClick={() => setIsSidebarOpen(true)} className="fixed left-4 bottom-4 z-30 p-4 bg-slate-900 text-white rounded-2xl shadow-2xl active:scale-95 transition-all"><PanelLeft className="w-6 h-6" /></button>}
+          <div className="flex-1 flex flex-col overflow-hidden">
+             {state.uiState === 'config' && (
+                <div className="flex-1 flex items-center justify-center p-8 bg-slate-100 overflow-y-auto">
+                   <div className="bg-white p-12 rounded-[56px] shadow-2xl border border-slate-200 max-w-2xl w-full">
+                      <h2 className="text-3xl font-black text-slate-900 italic uppercase mb-10 flex items-center gap-3"><Settings className="w-8 h-8 text-blue-600" /> Init Research</h2>
+                      <div className="space-y-8">
+                        <div className="space-y-2"><label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Project Title</label><input type="text" value={projectTitle} onChange={e => setProjectTitle(e.target.value)} className="w-full bg-slate-50 border rounded-2xl p-4 text-sm font-bold outline-none" /></div>
+                        <div className="space-y-2"><label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Archive Repository</label><input list="archive-options" value={archiveName} onChange={e => setArchiveName(e.target.value)} className="w-full bg-slate-50 border rounded-2xl p-4 text-sm font-bold outline-none" /><datalist id="archive-options">{PRESET_ARCHIVES.map(a => <option key={a} value={a} />)}</datalist></div>
+                        
+                        <div className="bg-slate-50 p-6 rounded-[32px] border border-slate-100 shadow-inner">
+                          <div className="flex items-center justify-between mb-4">
+                            <span className="text-xs font-black uppercase tracking-tight flex items-center gap-2"><ListChecks className="w-4 h-4 text-blue-500" /> Scope Limit</span>
+                            <button onClick={() => setUseRange(!useRange)} className={`w-10 h-6 rounded-full transition-all relative ${useRange ? 'bg-blue-600 shadow-lg shadow-blue-100' : 'bg-slate-300'}`}>
+                              <div className={`absolute top-1 left-1 w-4 h-4 bg-white rounded-full transition-all ${useRange ? 'translate-x-4' : ''}`} />
+                            </button>
+                          </div>
+                          {useRange && (
+                            <div className="flex items-center gap-3 animate-in slide-in-from-top-2 duration-300">
+                              <div className="flex-1 space-y-1">
+                                <label className="text-[9px] font-bold text-slate-400 uppercase">Start Page</label>
+                                <input type="number" min={1} max={state.files.length} value={rangeStart} onChange={e => setRangeStart(Math.max(1, parseInt(e.target.value) || 1))} className="w-full p-3 bg-white border rounded-xl text-xs font-bold shadow-sm" />
+                              </div>
+                              <div className="pt-4 text-slate-300 font-black">TO</div>
+                              <div className="flex-1 space-y-1">
+                                <label className="text-[9px] font-bold text-slate-400 uppercase">End Page</label>
+                                <input type="number" min={rangeStart} max={state.files.length} value={rangeEnd} onChange={e => setRangeEnd(Math.min(state.files.length, Math.max(rangeStart, parseInt(e.target.value) || 1)))} className="w-full p-3 bg-white border rounded-xl text-xs font-bold shadow-sm" />
+                              </div>
+                            </div>
+                          )}
+                          <div className="mt-4 text-[10px] font-bold text-slate-400 uppercase text-center">Total Uploaded: {state.files.length} pages</div>
+                        </div>
 
-      {/* Lightbox for Image Zoom (still available from table thumbnail) */}
-      {zoomedImage && (
-        <div className="fixed inset-0 z-50 bg-slate-900/80 flex items-center justify-center p-8 backdrop-blur-sm" onClick={() => setZoomedImage(null)}>
-          <button className="absolute top-4 right-4 text-white hover:text-slate-200 p-2">
-            <X className="w-8 h-8" />
-          </button>
-          <img src={zoomedImage} alt="Zoomed" className="max-w-full max-h-full object-contain shadow-2xl rounded-lg" onClick={e => e.stopPropagation()} />
+                        <button onClick={async () => {
+                          let finalFiles = [...state.files];
+                          if (useRange) { 
+                            finalFiles = finalFiles.slice(rangeStart - 1, rangeEnd); 
+                            setPageRange({ start: rangeStart, end: rangeEnd }); 
+                          } else { 
+                            setPageRange(null); 
+                          }
+                          setState(s => ({ ...s, files: finalFiles, uiState: 'dashboard', archiveName, processingStatus: { total: finalFiles.length, processed: 0, currentStep: 'Analyzing Topography...', isComplete: false } }));
+                          (async () => {
+                            const concurrency = state.tier === Tier.PAID ? 5 : 2; 
+                            for (let i = 0; i < finalFiles.length; i += concurrency) {
+                              await Promise.all(finalFiles.slice(i, i + concurrency).map(async (p) => {
+                                setState(prev => ({ ...prev, files: prev.files.map(f => f.id === p.id ? { ...f, status: 'analyzing' } : f) }));
+                                try { const res = await analyzePageContent(p, state.tier); setState(prev => ({ ...prev, files: prev.files.map(f => f.id === p.id ? { ...f, ...res } : f), processingStatus: { ...prev.processingStatus, processed: prev.processingStatus.processed + 1 } })); } 
+                                catch (e) { setState(prev => ({ ...prev, files: prev.files.map(f => f.id === p.id ? { ...f, status: 'error' } : f) })); }
+                              }));
+                            }
+                            setState(prev => ({ ...prev, processingStatus: { ...prev.processingStatus, isComplete: true } }));
+                          })();
+                        }} className="w-full bg-slate-900 text-white py-5 rounded-[28px] font-black uppercase tracking-widest hover:bg-blue-600 transition-all active:scale-95 shadow-2xl"><Play className="w-5 h-5 inline mr-2" /> Activate Scope</button>
+                      </div>
+                   </div>
+                </div>
+             )}
+             {state.uiState === 'dashboard' && renderDashboard()}
+             {state.uiState === 'clustering' && renderClustering()}
+             {state.uiState === 'entities' && renderEntityExplorer()}
+          </div>
+        </>
+      )}
+      {expandedField && (
+        <div className="fixed inset-0 z-[100] bg-slate-900/95 backdrop-blur-2xl p-8 flex items-center justify-center">
+          <div className="bg-white w-full h-full rounded-[56px] shadow-2xl overflow-hidden flex flex-col">
+            <header className="p-10 border-b flex justify-between items-center shrink-0"><div className="flex items-center gap-4"><div className="w-12 h-12 bg-blue-600 rounded-2xl flex items-center justify-center text-white shadow-xl"><Edit3 className="w-6 h-6" /></div><div><h3 className="text-2xl font-black uppercase italic tracking-tight">{expandedField.label}</h3><p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">{state.files.find(f => f.id === expandedField.pageId)?.indexName}</p></div></div><button onClick={() => setExpandedField(null)} className="p-4 hover:bg-slate-100 rounded-2xl transition-all"><X className="w-10 h-10 text-slate-400" /></button></header>
+            <div className="flex-1 flex overflow-hidden">
+               <div className="w-1/2 bg-slate-900 p-12 flex items-center justify-center overflow-auto"><img src={state.files.find(f => f.id === expandedField.pageId)?.previewUrl} alt="Preview" className="max-w-full max-h-full shadow-2xl rounded-lg" style={{ transform: `rotate(${state.files.find(f => f.id === expandedField.pageId)?.rotation || 0}deg)` }} /></div>
+               <div className="w-1/2 p-12 flex flex-col bg-white">
+                  {(() => {
+                      const currentPage = state.files.find(f => f.id === expandedField.pageId);
+                      const currentVal = (currentPage as any)?.[expandedField.field];
+                      const aiFallback = expandedField.field === 'manualTranscription' ? currentPage?.generatedTranscription : (expandedField.field === 'manualDescription' ? currentPage?.generatedTranslation : null);
+                      return (
+                          <div className="flex-1 flex flex-col relative">
+                              <textarea className="flex-1 border-2 border-slate-100 rounded-[40px] p-10 font-mono text-base outline-none focus:border-blue-500 bg-slate-50 shadow-inner leading-relaxed resize-none" value={currentVal || ''} placeholder={aiFallback ? "Loading AI Draft..." : "Start typing..."} dir={getTextDirection(currentVal || aiFallback || '')} onChange={e => setState(s => ({ ...s, files: s.files.map(f => f.id === expandedField.pageId ? { ...f, [expandedField.field]: e.target.value } : f) }))} />
+                              {(!currentVal && aiFallback) && (<div className="absolute inset-0 p-10 font-mono text-base pointer-events-none opacity-40 italic whitespace-pre-wrap overflow-hidden" dir={getTextDirection(aiFallback)}>{aiFallback}</div>)}
+                          </div>
+                      );
+                  })()}
+                  <div className="grid grid-cols-2 gap-4 mt-8"><button onClick={() => setExpandedField(null)} className="bg-slate-100 text-slate-500 py-5 rounded-[28px] font-black uppercase hover:bg-slate-200 transition-all">Discard</button><button onClick={() => setExpandedField(null)} className="bg-slate-900 text-white py-5 rounded-[28px] font-black uppercase hover:bg-blue-600 transition-all active:scale-95 shadow-xl">Commit</button></div>
+               </div>
+            </div>
+          </div>
         </div>
       )}
-    </>
+      {zoomedPageId && (
+        <div className="fixed inset-0 z-[110] bg-slate-900/98 backdrop-blur-2xl flex items-center justify-center p-12 cursor-zoom-out" onClick={() => setZoomedPageId(null)}><img src={state.files.find(f => f.id === zoomedPageId)?.previewUrl} alt="Zoomed" className="max-w-full max-h-full object-contain shadow-2xl rounded-sm" style={{ transform: `rotate(${state.files.find(f => f.id === zoomedPageId)?.rotation || 0}deg)` }} /></div>
+      )}
+    </div>
   );
 };
 

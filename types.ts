@@ -1,6 +1,6 @@
-
 export enum AnalysisMode {
   PDF = 'PDF',
+  BATCH_PDF = 'BATCH_PDF',
   FOLDER = 'FOLDER',
   DRIVE = 'DRIVE',
 }
@@ -17,10 +17,21 @@ export interface ProcessingStatus {
   isComplete: boolean;
 }
 
+export interface EntityReference {
+  name: string;
+  id?: number;
+}
+
 export interface NamedEntities {
-  people: string[];
-  places: string[];
-  organizations: string[];
+  people: EntityReference[];
+  organizations: EntityReference[];
+  roles: EntityReference[];
+}
+
+export interface Correspondent {
+  name: string;
+  role?: string;
+  id?: number;
 }
 
 export interface ArchivalPage {
@@ -29,6 +40,7 @@ export interface ArchivalPage {
   indexName: string; // The display name (Folder Name + Image Name or PDF Name + Page #)
   fileObj: File;
   previewUrl: string; // Object URL for thumbnail
+  rotation?: number; // 0, 90, 180, 270 (degrees)
   
   // Step C Data
   language?: string;
@@ -45,6 +57,8 @@ export interface ArchivalPage {
   // Step F Data
   generatedTranscription?: string;
   generatedTranslation?: string; // To English
+  confidenceScore?: number; // 1-5 rating of transcription confidence
+  entities?: NamedEntities; // Entities extracted during transcription
   
   // Processing States
   status: 'pending' | 'analyzing' | 'analyzed' | 'transcribing' | 'done' | 'error';
@@ -60,11 +74,15 @@ export interface Cluster {
   
   // Detailed Metadata
   prisonName?: string;
+  docTypes?: string[];
+  subjects?: string[];
   languages?: string[];
   originalDate?: string;
   standardizedDate?: string; // yyyy-mm-dd
-  sender?: string; // name | role
-  recipient?: string; // name | role
+  
+  // Multi-correspondent support
+  senders?: Correspondent[];
+  recipients?: Correspondent[];
   
   // Aggregated Entities
   entities?: NamedEntities;
@@ -77,5 +95,6 @@ export interface AppState {
   files: ArchivalPage[];
   clusters: Cluster[];
   processingStatus: ProcessingStatus;
-  uiState: 'welcome' | 'config' | 'dashboard' | 'clustering';
+  uiState: 'welcome' | 'config' | 'dashboard' | 'clustering' | 'entities';
+  archiveName?: string;
 }
