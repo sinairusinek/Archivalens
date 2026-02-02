@@ -1,7 +1,7 @@
 
 import { GoogleGenAI, Type } from "@google/genai";
-import { ArchivalPage, Cluster, Tier } from "../types";
-import { CONTROLLED_VOCABULARY, SUBJECTS_LIST } from "./vocabulary";
+import { ArchivalPage, Cluster, Tier, DocType } from "../types";
+import { CONTROLLED_VOCABULARY, SUBJECTS_LIST, DOCUMENT_TYPES } from "./vocabulary";
 
 const PRISON_LIST = [
   "Abu Kabir Lock-up", "Athlit Clearance Camp", "Athlit Detention Camp", "Bethlehem Detention Camp (Villa Salem)",
@@ -14,9 +14,6 @@ const PRISON_LIST = [
   "Sarona Internment Camp", "Sembel Detention Camp, Asmara, Eritrea", "Tel Aviv Lock-up", "Tulkarem Lock-up",
   "Unknown", "Wilhelma-Hamîdije Internment Camp", "Women's Prison, Bethlehem"
 ];
-
-// Correctly initialize GoogleGenAI once with process.env.API_KEY as per guidelines
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
 const rotateCanvas = (sourceCanvas: HTMLCanvasElement, degrees: number): HTMLCanvasElement => {
   if (degrees === 0) return sourceCanvas;
@@ -67,39 +64,28 @@ const fileToGenerativePart = async (file: File, rotation: number = 0): Promise<{
     } catch (e) { console.warn("TIFF conversion failed", e); }
   }
 
-  if (rotation !== 0) {
-     return new Promise((resolve, reject) => {
-        const img = new Image();
-        const url = URL.createObjectURL(file);
-        img.onload = () => {
-           let canvas = document.createElement('canvas');
-           canvas.width = img.width; canvas.height = img.height;
-           const ctx = canvas.getContext('2d');
-           if(ctx) {
-             ctx.drawImage(img, 0, 0);
-             canvas = rotateCanvas(canvas, rotation);
-             const dataUrl = canvas.toDataURL(file.type === 'image/png' ? 'image/png' : 'image/jpeg');
-             resolve({ inlineData: { data: dataUrl.split(',')[1], mimeType: file.type === 'image/png' ? 'image/png' : 'image/jpeg' } });
-           } else { reject(new Error("Canvas context failed")); }
-           URL.revokeObjectURL(url);
-        };
-        img.onerror = reject;
-        img.src = url;
-     });
-  }
-
   return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onloadend = () => {
-      const base64String = (reader.result as string).split(',')[1];
-      resolve({ inlineData: { data: base64String, mimeType: file.type } });
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+       let canvas = document.createElement('canvas');
+       canvas.width = img.width; canvas.height = img.height;
+       const ctx = canvas.getContext('2d');
+       if(ctx) {
+         ctx.drawImage(img, 0, 0);
+         if (rotation !== 0) canvas = rotateCanvas(canvas, rotation);
+         const dataUrl = canvas.toDataURL(file.type === 'image/png' ? 'image/png' : 'image/jpeg');
+         resolve({ inlineData: { data: dataUrl.split(',')[1], mimeType: file.type === 'image/png' ? 'image/png' : 'image/jpeg' } });
+       } else { reject(new Error("Canvas context failed")); }
+       URL.revokeObjectURL(url);
     };
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
+    img.onerror = reject;
+    img.src = url;
   });
 };
 
 const generateContentWithRetry = async (params: any, retries = 3): Promise<any> => {
+  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
   try { return await ai.models.generateContent(params); } catch (e: any) {
     const isRateLimit = e.status === 429 || e.code === 429 || (e.message && e.message.includes('429')) || (e.status && e.status.toString().includes('RESOURCE_EXHAUSTED'));
     if (isRateLimit && retries > 0) {
@@ -133,26 +119,6 @@ const repairTruncatedJSON = (json: string): string => {
   return cleaned;
 };
 
-const safeParseTranscriptionJSON = (jsonString: string): any => {
-  const repaired = repairTruncatedJSON(jsonString);
-  try {
-    return JSON.parse(repaired);
-  } catch (e) {
-    console.warn("Standard JSON parse failed, attempting regex salvage...", e);
-    const transMatch = repaired.match(/"transcription"\s*:\s*"([\s\S]*?)"(?=\s*[,}]) /);
-    const translationMatch = repaired.match(/"translation"\s*:\s*"([\s\S]*?)"(?=\s*[,}]) /);
-    const confidenceMatch = repaired.match(/"confidenceScore"\s*:\s*(\d+)/);
-    if (transMatch) {
-      return {
-        transcription: transMatch[1].replace(/\\n/g, '\n').replace(/\\"/g, '"'),
-        translation: translationMatch ? translationMatch[1].replace(/\\n/g, '\n').replace(/\\"/g, '"') : "",
-        confidenceScore: confidenceMatch ? parseInt(confidenceMatch[1]) : 3
-      };
-    }
-    throw e;
-  }
-};
-
 const salvageJSONList = (jsonString: string): any[] => {
   try {
     const repaired = repairTruncatedJSON(jsonString);
@@ -181,13 +147,22 @@ const matchInVocabulary = (name: string): number | undefined => {
   return match?.id;
 };
 
+const findDocTypeByName = (name: string): DocType | undefined => {
+  if (!name) return undefined;
+  const low = name.toLowerCase().trim();
+  return DOCUMENT_TYPES.find(d => d.name.toLowerCase() === low);
+};
+
 export const analyzePageContent = async (page: ArchivalPage, tier: 'FREE' | 'PAID'): Promise<Partial<ArchivalPage>> => {
   try {
     const imagePart = await fileToGenerativePart(page.fileObj, page.rotation || 0);
-    const prompt = `Analyze this archival document page. 1. Identify language(s). 2. Identify production mode (print, photo, handwriting, typewriting). 3. Check for Hebrew handwriting specifically.`;
+    const prompt = `Analyze this archival document page. 
+    1. Identify language(s). 
+    2. Identify production mode. Strictly use one of: "Handwritten", "Printed", "Typewritten", "No Text", or "Mixed Form".
+    3. Check for Hebrew handwriting specifically.`;
+    
     const response = await generateContentWithRetry({
       model: "gemini-3-flash-preview",
-      // Corrected: pass imagePart directly as part of contents array
       contents: { parts: [imagePart, { text: prompt }] },
       config: { 
         responseMimeType: "application/json", 
@@ -202,7 +177,6 @@ export const analyzePageContent = async (page: ArchivalPage, tier: 'FREE' | 'PAI
         } 
       }
     });
-    // response.text is a getter property, not a method
     const result = JSON.parse(repairTruncatedJSON(response.text || "{}"));
     return { ...result, status: 'analyzed' };
   } catch (error) { return { status: 'error', error: "Analysis failed" }; }
@@ -211,7 +185,11 @@ export const analyzePageContent = async (page: ArchivalPage, tier: 'FREE' | 'PAI
 export const transcribeAndTranslatePage = async (page: ArchivalPage, tier: 'FREE' | 'PAID'): Promise<Partial<ArchivalPage>> => {
   try {
     const imagePart = await fileToGenerativePart(page.fileObj, page.rotation || 0);
-    let prompt = `Transcribe this archival document exactly. Detect language, preserve layout, and score confidence 1-5. 
+    let prompt = `Transcribe this archival document exactly. 
+    Detect primary language.
+    Identify production mode (strictly: "Handwritten", "Printed", "Typewritten", "No Text", or "Mixed Form").
+    Preserve layout.
+    Score confidence 1-5 (1: very low, 5: high). 
     If 'shouldTranslate' is true, provide an English translation.`;
     
     const response = await generateContentWithRetry({
@@ -224,19 +202,20 @@ export const transcribeAndTranslatePage = async (page: ArchivalPage, tier: 'FREE
           properties: { 
             transcription: { type: Type.STRING }, 
             translation: { type: Type.STRING }, 
-            confidenceScore: { type: Type.INTEGER }
+            confidenceScore: { type: Type.INTEGER },
+            language: { type: Type.STRING },
+            productionMode: { type: Type.STRING }
           } 
         } 
       }
     });
-    
-    // response.text is a property
-    const result = safeParseTranscriptionJSON(response.text || "{}");
-
+    const result = JSON.parse(repairTruncatedJSON(response.text || "{}"));
     return { 
       generatedTranscription: result.transcription || "", 
       generatedTranslation: result.translation || "", 
       confidenceScore: result.confidenceScore || 3, 
+      language: result.language || page.language,
+      productionMode: result.productionMode || page.productionMode,
       status: 'done' 
     };
   } catch (error) { 
@@ -254,26 +233,36 @@ export const clusterPages = async (pages: ArchivalPage[], tier: Tier): Promise<C
     transcription: (p.manualTranscription || p.generatedTranscription || "").slice(0, 15000)
   }));
   
-  const vocabSummary = CONTROLLED_VOCABULARY.map(v => `${v.name}`).join('|');
+  const vocabSummary = CONTROLLED_VOCABULARY.map(v => v.name).join('|');
+  const docTypesSummary = DOCUMENT_TYPES.map(d => d.name).join('|');
 
   const prompt = `
-    TASK 1: CLUSTERING
-    Group these archival pages into logical discrete documents (Clusters). 
-    A cluster MUST represent exactly ONE physical document.
-    SPLIT ON DATE CHANGE: Different dates mean different clusters.
+    TASK: CLUSTERING & METADATA EXTRACTION
+    Analyze the provided archival pages and group them into physical documents (Clusters).
 
-    TASK 2: ENTITY EXTRACTION
-    For EACH cluster, extract all People, Organizations, and Roles mentioned in the text.
-    THIS IS MANDATORY. Even if a name is not in the vocabulary, extract it.
-    
-    REFERENCE VOCABULARY (Check against this first): [${vocabSummary.slice(0, 40000)}]
+    CRITICAL: YOU MUST EXTRACT SENDERS AND RECIPIENTS FROM THE 'indexName' FIELD.
+    The 'indexName' often contains text like "Correspondence from [Name] to [Name]" or "Letter to [Name] from [Name]".
+    Example: "Correspondence from Margery Fry to K.W. Blaxter" 
+    - SENDER: Margery Fry
+    - RECIPIENT: K.W. Blaxter
+    Failure to extract these names when present in the title is a MAJOR ERROR. If the transcription contains other names (Dear X, Yours Y), combine them.
+
+    For EACH cluster:
+    - title: Accurate descriptive title.
+    - pageRange: e.g. "Page 1-3".
+    - summary: 1-2 sentence description.
+    - pageIds: array of IDs belonging to this cluster.
+    - senders: array of {name, role, organizationCategory}.
+    - recipients: array of {name, role, organizationCategory}.
+    - docTypes: MUST select from names in this list: [${docTypesSummary}].
+    - subjects: select from: [${SUBJECTS_LIST.join('|')}].
+    - entities: list people, organizations, and roles mentioned in text.
+
+    REFERENCE VOCABULARY: [${vocabSummary.slice(0, 30000)}]
     PRISON LIST: ${PRISON_LIST.join('|')}
-    SUBJECTS: ${SUBJECTS_LIST.join('|')}
-    
-    Input Data (Pages and Transcriptions):
+
+    Input Data:
     ${JSON.stringify(inputData)}
-    
-    Return a JSON array of Clusters. Ensure the 'entities' field is fully populated for every cluster.
   `;
 
   const runClustering = async (model: string) => {
@@ -298,8 +287,30 @@ export const clusterPages = async (pages: ArchivalPage[], tier: Tier): Promise<C
               languages: { type: Type.ARRAY, items: { type: Type.STRING } },
               originalDate: { type: Type.STRING },
               standardizedDate: { type: Type.STRING },
-              senders: { type: Type.ARRAY, items: { type: Type.OBJECT, properties: { name: { type: Type.STRING }, role: { type: Type.STRING } } } },
-              recipients: { type: Type.ARRAY, items: { type: Type.OBJECT, properties: { name: { type: Type.STRING }, role: { type: Type.STRING } } } },
+              senders: { 
+                type: Type.ARRAY, 
+                items: { 
+                  type: Type.OBJECT, 
+                  properties: { 
+                    name: { type: Type.STRING }, 
+                    role: { type: Type.STRING },
+                    organizationCategory: { type: Type.STRING }
+                  },
+                  required: ["name"]
+                } 
+              },
+              recipients: { 
+                type: Type.ARRAY, 
+                items: { 
+                  type: Type.OBJECT, 
+                  properties: { 
+                    name: { type: Type.STRING }, 
+                    role: { type: Type.STRING },
+                    organizationCategory: { type: Type.STRING }
+                  },
+                  required: ["name"]
+                } 
+              },
               entities: { 
                 type: Type.OBJECT, 
                 properties: { 
@@ -310,15 +321,17 @@ export const clusterPages = async (pages: ArchivalPage[], tier: Tier): Promise<C
                 required: ["people", "organizations", "roles"]
               }
             },
-            required: ["id", "title", "pageIds", "entities"]
+            required: ["title", "pageIds", "senders", "recipients"]
           }
         }
       }
     });
-    // response.text is a property
+    
     const clusters = salvageJSONList(response.text || "[]");
-    return clusters.map(c => ({
+    return clusters.map((c, idx) => ({
       ...c,
+      id: c.id || idx + 1,
+      docTypes: (c.docTypes || []).map((name: string) => findDocTypeByName(name)).filter(Boolean),
       senders: (c.senders || []).map((s: any) => ({ ...s, id: matchInVocabulary(s.name) })),
       recipients: (c.recipients || []).map((r: any) => ({ ...r, id: matchInVocabulary(r.name) })),
       entities: {

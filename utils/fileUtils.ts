@@ -35,8 +35,12 @@ export const generateClustersTSV = (clusters: Cluster[]): string => {
     "Date (YYYY-MM-DD)",
     "Doc Types",
     "Subjects",
-    "Sender",
-    "Recipient",
+    "Sender Names",
+    "Sender Roles",
+    "Sender Categories",
+    "Recipient Names",
+    "Recipient Roles",
+    "Recipient Categories",
     "Prison Name",
     "Languages",
     "People Mentioned",
@@ -50,10 +54,14 @@ export const generateClustersTSV = (clusters: Cluster[]): string => {
     `"${c.summary.replace(/"/g, '""').replace(/\n/g, ' ')}"`,
     c.originalDate || "",
     c.standardizedDate || "",
-    (c.docTypes || []).join(", "),
+    (c.docTypes || []).map(dt => dt.name).join(", "),
     (c.subjects || []).join(", "),
     (c.senders || []).map(s => s.name).join(", "),
+    (c.senders || []).map(s => s.role || "").join(", "),
+    (c.senders || []).map(s => s.organizationCategory || "").join(", "),
     (c.recipients || []).map(r => r.name).join(", "),
+    (c.recipients || []).map(r => r.role || "").join(", "),
+    (c.recipients || []).map(r => r.organizationCategory || "").join(", "),
     c.prisonName || "",
     (c.languages || []).join(", "),
     `"${(c.entities?.people || []).map(p => p.name).join(', ')}"`,
@@ -82,7 +90,6 @@ export const generateVocabularyCSV = (reconciliationList: ReconciliationRecord[]
     `"${(r.matchedName || "").replace(/"/g, '""')}"`,
     r.matchedId?.toString() || "",
     r.status,
-    // Fix: Changed r.sourceIds to r.sourceAppearances as sourceIds does not exist on ReconciliationRecord
     r.sourceAppearances.length.toString(),
     r.addedAt || ""
   ]);
@@ -103,6 +110,7 @@ export const generateMasterVocabularyCSV = (vocab: EntityReference[]): string =>
 export const generateFullJSON = (
   projectTitle: string, 
   archiveName: string,
+  userName: string,
   tier: string,
   pageRange: { start: number, end: number } | null,
   files: ArchivalPage[], 
@@ -111,9 +119,11 @@ export const generateFullJSON = (
   const exportData = {
     projectTitle,
     archiveName,
+    researcherName: userName,
     tier,
     pageRange,
-    exportedAt: new Date().toISOString(),
+    exportedAt: new Date().toLocaleString(),
+    exportedAtISO: new Date().toISOString(),
     stats: {
       totalPages: files.length,
       totalClusters: clusters.length
@@ -151,6 +161,7 @@ export const generateProjectBackup = (
       createdAt: new Date().toISOString(),
       projectTitle,
       archiveName,
+      userName: state.userName,
     },
     appState: {
       ...state,

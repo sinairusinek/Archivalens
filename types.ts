@@ -43,6 +43,7 @@ export interface Correspondent {
   name: string;
   role?: string;
   id?: number;
+  organizationCategory?: string;
 }
 
 export interface ArchivalPage {
@@ -76,6 +77,11 @@ export interface ArchivalPage {
   error?: string;
 }
 
+export interface DocType {
+  id: number;
+  name: string;
+}
+
 export interface Cluster {
   id: number;
   title: string;
@@ -85,7 +91,7 @@ export interface Cluster {
   
   // Detailed Metadata
   prisonName?: string;
-  docTypes?: string[];
+  docTypes?: DocType[];
   subjects?: string[];
   languages?: string[];
   originalDate?: string;
@@ -117,6 +123,7 @@ export interface ReconciliationRecord {
 
 export interface AppState {
   apiKey: string | null;
+  userName: string; // Researcher Name
   mode: AnalysisMode | null;
   tier: Tier;
   files: ArchivalPage[];
