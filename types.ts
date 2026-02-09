@@ -44,6 +44,7 @@ export interface Correspondent {
   role?: string;
   id?: number;
   organizationCategory?: string;
+  nationality?: string;
 }
 
 export interface ArchivalPage {

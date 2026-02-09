@@ -8,7 +8,7 @@ import {
   ChevronRight, PanelLeft, StickyNote, Activity, PieChart, Database, ListFilter, Briefcase as RoleIcon, Plus, Link as LinkIcon, Link2Off,
   FileSpreadsheet, ShieldCheck, Star, Fingerprint, History, Check, UserMinus, UserPlus, Save as SaveIcon, BookOpen, Layers,
   ChevronDown as ChevronDownIcon, FileSearch, GraduationCap, FlagTriangleLeft, HandMetal, Heart, Landmark, Send, UserCircle, Eye,
-  RefreshCw, Maximize, Minimize, User as UserIcon, Zap, Cpu, AlertCircle
+  RefreshCw, Maximize, Minimize, User as UserIcon, Zap, Cpu, AlertCircle, ChevronLeft
 } from 'lucide-react';
 import { ArchivalPage, AppState, AnalysisMode, Tier, ProcessingStatus, Cluster, Correspondent, EntityReference, NamedEntities, ReconciliationRecord, SourceAppearance, DocType } from '../types';
 import { analyzePageContent, transcribeAndTranslatePage, clusterPages } from '../services/geminiService';
@@ -46,6 +46,39 @@ const INITIAL_STATE: AppState = {
 const getTextDirection = (text: string | undefined): 'rtl' | 'ltr' => {
   if (!text) return 'ltr';
   return /[\u0590-\u05FF]/.test(text) ? 'rtl' : 'ltr';
+};
+
+const ProcessingBanner: React.FC<{ status: ProcessingStatus }> = ({ status }) => {
+  if (status.total === 0 || status.isComplete) return null;
+  const percentage = Math.round((status.processed / status.total) * 100);
+
+  return (
+    <div className="fixed bottom-8 left-1/2 -translate-x-1/2 z-[200] w-full max-w-lg px-4">
+      <div className="bg-slate-900 text-white rounded-[32px] shadow-2xl p-6 border border-white/10 backdrop-blur-xl animate-in fade-in slide-in-from-bottom-4 duration-500">
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center gap-3">
+            <div className="p-2 bg-blue-500 rounded-xl animate-pulse">
+              <Bot className="w-4 h-4 text-white" />
+            </div>
+            <div>
+              <div className="text-[10px] font-black uppercase tracking-widest text-slate-400">Gemini Task Active</div>
+              <div className="text-sm font-black italic uppercase tracking-tight">{status.currentStep}</div>
+            </div>
+          </div>
+          <div className="text-right">
+            <div className="text-2xl font-black italic tracking-tighter">{percentage}%</div>
+            <div className="text-[10px] font-bold text-slate-500 uppercase">{status.processed} / {status.total} pages</div>
+          </div>
+        </div>
+        <div className="w-full h-2 bg-white/5 rounded-full overflow-hidden">
+          <div 
+            className="h-full bg-gradient-to-r from-blue-600 to-blue-400 transition-all duration-500 ease-out shadow-[0_0_15px_rgba(37,99,235,0.5)]" 
+            style={{ width: `${percentage}%` }}
+          />
+        </div>
+      </div>
+    </div>
+  );
 };
 
 const ClusterEditor: React.FC<{ 
@@ -205,7 +238,6 @@ export const App: React.FC = () => {
     setState(s => ({
       ...s,
       files: s.files.map(f => {
-        // Only toggle for filtered pages
         const isFiltered = filteredPages.some(fp => fp.id === f.id);
         return isFiltered ? { ...f, shouldTranscribe: checked } : f;
       })
@@ -247,7 +279,6 @@ export const App: React.FC = () => {
     setIsProcessingFiles(true);
     try {
       const isZip = blob.type === 'application/zip' || (blob instanceof File && blob.name.endsWith('.zip'));
-      
       let appData: any;
       let restoredFiles: ArchivalPage[] = [];
 
@@ -450,33 +481,54 @@ export const App: React.FC = () => {
     </div>
   );
 
-  const renderCommonHeader = (actions?: React.ReactNode) => (
-    <header className="bg-white border-b px-8 py-4 flex items-center justify-between shrink-0">
-      <div className="flex items-center gap-6">
-        <div className="flex bg-slate-100 p-1 rounded-xl">
-          {['dashboard', 'clustering', 'entities'].map((view: any) => (
-            <button key={view} onClick={() => setState(s => ({ ...s, uiState: view }))} className={`px-4 py-1.5 rounded-lg text-xs font-black uppercase tracking-tight flex items-center gap-1.5 ${state.uiState === view ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>
-              {view === 'entities' ? 'Research Index' : view === 'dashboard' ? 'Pages' : 'Documents'}
+  const renderCommonHeader = (actions?: React.ReactNode) => {
+    const views = [
+      { id: 'dashboard', label: 'Pages', icon: LayoutGrid },
+      { id: 'clustering', label: 'Documents', icon: Layers },
+      { id: 'entities', label: 'Research Index', icon: Fingerprint }
+    ];
+
+    return (
+      <header className="bg-white border-b px-8 py-4 flex items-center justify-between shrink-0">
+        <div className="flex items-center gap-6">
+          <div className="flex bg-slate-100 p-1 rounded-xl">
+            {views.map((view) => (
+              <button 
+                key={view.id} 
+                onClick={() => setState(s => ({ ...s, uiState: view.id as any }))} 
+                className={`px-4 py-1.5 rounded-lg text-xs font-black uppercase tracking-tight flex items-center gap-2 transition-all ${state.uiState === view.id ? 'bg-white text-slate-900 shadow-sm ring-1 ring-slate-200' : 'text-slate-500 hover:text-slate-700'}`}
+              >
+                <view.icon className="w-3 h-3" />
+                {view.label}
+              </button>
+            ))}
+          </div>
+          <div className="h-6 w-px bg-slate-200" />
+          <div className="flex items-center gap-1">
+            <button onClick={toggleFullscreen} className={`p-2 rounded-lg transition-colors ${isFullscreen ? 'bg-blue-50 text-blue-600' : 'hover:bg-slate-100 text-slate-400'}`} title="Toggle Fullscreen">
+              {isFullscreen ? <Minimize className="w-4 h-4" /> : <Maximize className="w-4 h-4" />}
             </button>
-          ))}
+            <button onClick={restartApp} className="p-2 hover:bg-slate-100 rounded-lg text-slate-400 transition-colors" title="Restart App">
+              <RefreshCw className="w-4 h-4" />
+            </button>
+          </div>
         </div>
-        <div className="h-6 w-px bg-slate-200" />
-        <div className="flex items-center gap-1">
-          <button onClick={toggleFullscreen} className={`p-2 rounded-lg transition-colors ${isFullscreen ? 'bg-blue-50 text-blue-600' : 'hover:bg-slate-100 text-slate-400'}`} title="Toggle Fullscreen">
-            {isFullscreen ? <Minimize className="w-4 h-4" /> : <Maximize className="w-4 h-4" />}
+        <div className="flex items-center gap-2">
+          {actions}
+          <div className="h-6 w-px bg-slate-200 mx-2" />
+          <button onClick={saveToDrive} disabled={isUploadingToDrive} className="p-2.5 bg-white border border-slate-200 hover:border-emerald-400 text-slate-600 rounded-xl transition-all shadow-sm group">
+            {isUploadingToDrive ? <Loader2 className="w-4 h-4 animate-spin text-emerald-500" /> : <Cloud className="w-4 h-4 group-hover:text-emerald-500 transition-colors" />}
           </button>
-          <button onClick={restartApp} className="p-2 hover:bg-slate-100 rounded-lg text-slate-400 transition-colors" title="Restart App">
-            <RefreshCw className="w-4 h-4" />
+          <button 
+            onClick={async () => { setIsZipping(true); try { const zipBlob = await generateProjectZip(state, projectTitle, archiveName || "", null); downloadFile(zipBlob, `${projectTitle}.aln_project.zip`, 'application/zip'); } finally { setIsZipping(false); } }} 
+            className="p-2.5 bg-slate-900 text-white rounded-xl hover:bg-blue-600 transition-all shadow-xl group"
+          >
+            {isZipping ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4 transition-transform group-hover:translate-y-0.5" />}
           </button>
         </div>
-      </div>
-      <div className="flex items-center gap-2">
-        {actions}
-        <button onClick={saveToDrive} disabled={isUploadingToDrive} className="p-2.5 bg-white border border-slate-200 hover:border-emerald-400 text-slate-600 rounded-xl transition-all shadow-sm">{isUploadingToDrive ? <Loader2 className="w-4 h-4 animate-spin" /> : <Cloud className="w-4 h-4" />}</button>
-        <button onClick={async () => { setIsZipping(true); try { const zipBlob = await generateProjectZip(state, projectTitle, archiveName || "", null); downloadFile(zipBlob, `${projectTitle}.aln_project.zip`, 'application/zip'); } finally { setIsZipping(false); } }} className="p-2.5 bg-slate-900 text-white rounded-xl hover:bg-blue-600 transition-all shadow-xl">{isZipping ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}</button>
-      </div>
-    </header>
-  );
+      </header>
+    );
+  };
 
   const renderUnifiedEntities = () => {
     const filteredRecs = state.reconciliationList.filter(r => {
@@ -545,11 +597,33 @@ export const App: React.FC = () => {
 
   return (
     <div className="flex h-screen w-full bg-slate-50 font-sans selection:bg-blue-100">
+      <ProcessingBanner status={state.processingStatus} />
+
       {state.uiState === 'welcome' ? renderWelcome() : (
         <>
           <aside className={`bg-white border-r flex flex-col transition-all duration-300 ${isSidebarOpen ? 'w-80' : 'w-0 overflow-hidden border-none'}`}>
             <div className="p-6 border-b flex items-center justify-between shrink-0"><div className="flex items-center gap-2"><div className="w-8 h-8 bg-slate-900 rounded-lg flex items-center justify-center"><Sparkles className="w-5 h-5 text-white" /></div><span className="font-black italic uppercase tracking-tighter text-xl">Archival Lens</span></div><button onClick={() => setIsSidebarOpen(false)} className="p-1 hover:bg-slate-100 rounded-lg"><PanelLeft className="w-4 h-4 text-slate-400" /></button></div>
             <div className="flex-1 overflow-y-auto p-6 space-y-8 custom-scrollbar">
+              <div className="space-y-4">
+                <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Workflow Stage</h4>
+                <div className="space-y-2">
+                  {[
+                    { id: 'dashboard', label: '1. Page OCR & Review', icon: FileSearch },
+                    { id: 'clustering', label: '2. Document Indexing', icon: Layers },
+                    { id: 'entities', label: '3. Entity Reconciliation', icon: Users }
+                  ].map(step => (
+                    <button 
+                      key={step.id} 
+                      onClick={() => setState(s => ({ ...s, uiState: step.id as any }))}
+                      className={`w-full flex items-center gap-3 px-4 py-3 rounded-2xl text-xs font-black uppercase tracking-tight transition-all border ${state.uiState === step.id ? 'bg-slate-900 text-white border-slate-900 shadow-lg translate-x-1' : 'bg-white text-slate-500 border-transparent hover:bg-slate-50'}`}
+                    >
+                      <step.icon className={`w-4 h-4 ${state.uiState === step.id ? 'text-blue-400' : 'text-slate-300'}`} />
+                      {step.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
               <div className="space-y-4">
                 <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Active Project</h4>
                 <div className="bg-slate-50 p-5 rounded-3xl border shadow-inner">
@@ -578,6 +652,7 @@ export const App: React.FC = () => {
             <div className="p-6 border-t bg-slate-50/50"><button onClick={() => setState(s => ({ ...s, uiState: 'welcome' }))} className="w-full flex items-center justify-center gap-2 text-[10px] font-black uppercase tracking-widest text-slate-400 hover:text-red-500 transition-colors py-2"><X className="w-3.5 h-3.5" /> Close Project</button></div>
           </aside>
           {!isSidebarOpen && <button onClick={() => setIsSidebarOpen(true)} className="fixed left-4 bottom-4 z-30 p-4 bg-slate-900 text-white rounded-2xl shadow-2xl active:scale-95 transition-all"><PanelLeft className="w-6 h-6" /></button>}
+          
           <div className="flex-1 flex flex-col overflow-hidden">
              {state.uiState === 'config' && (
                 <div className="flex-1 flex items-center justify-center p-8 bg-slate-100 overflow-y-auto">
@@ -607,7 +682,7 @@ export const App: React.FC = () => {
                                <Zap className="w-5 h-5" />
                                <span className="text-[10px] font-black uppercase">Standard (Flash)</span>
                             </button>
-                            <button onClick={() => setState(s => ({...s, tier: Tier.PAID}))} className={`p-4 rounded-2xl border flex flex-col items-center gap-2 transition-all ${state.tier === Tier.PAID ? 'bg-amber-500 border-amber-500 text-white shadow-lg' : 'bg-slate-50 text-slate-500 border-slate-200'}`}>
+                            <button onClick={() => setState(s => ({...s, tier: Tier.PAID}))} className={`p-4 rounded-2xl border flex flex-col items-center gap-2 transition-all ${state.tier === Tier.PAID ? 'bg-amber-50 border-amber-500 text-white shadow-lg' : 'bg-slate-50 text-slate-500 border-slate-200'}`}>
                                <Cpu className="w-5 h-5" />
                                <span className="text-[10px] font-black uppercase">High-Density (Pro)</span>
                             </button>
@@ -626,17 +701,29 @@ export const App: React.FC = () => {
                          const toProc = state.files.filter(f => f.shouldTranscribe);
                          if (toProc.length === 0) { alert("Select pages first."); return; }
                          setState(s => ({ ...s, processingStatus: { total: toProc.length, processed: 0, currentStep: 'Gemini OCR Pipeline...', isComplete: false } }));
+                         
                          (async () => {
                            const concurrency = state.tier === Tier.PAID ? 5 : 1;
                            for (let i = 0; i < toProc.length; i += concurrency) {
-                             await Promise.all(toProc.slice(i, i + concurrency).map(async (p) => {
+                             const batch = toProc.slice(i, i + concurrency);
+                             // Set batch pages to transcribing state
+                             setState(prev => ({
+                               ...prev,
+                               files: prev.files.map(f => batch.some(bp => bp.id === f.id) ? { ...f, status: 'transcribing' } : f)
+                             }));
+
+                             await Promise.all(batch.map(async (p) => {
                                const res = await transcribeAndTranslatePage(p, state.tier);
-                               setState(prev => ({ ...prev, files: prev.files.map(f => f.id === p.id ? { ...f, ...res, manualTranscription: res.generatedTranscription } : f), processingStatus: { ...prev.processingStatus, processed: prev.processingStatus.processed + 1 } }));
+                               setState(prev => ({ 
+                                 ...prev, 
+                                 files: prev.files.map(f => f.id === p.id ? { ...f, ...res, manualTranscription: res.generatedTranscription, status: 'done' } : f), 
+                                 processingStatus: { ...prev.processingStatus, processed: prev.processingStatus.processed + 1 } 
+                               }));
                              }));
                            }
                            setState(prev => ({ ...prev, processingStatus: { ...prev.processingStatus, isComplete: true } }));
                          })();
-                       }} className="px-6 py-2.5 rounded-2xl text-xs font-black uppercase tracking-widest bg-blue-600 hover:bg-blue-700 text-white flex items-center gap-2 shadow-xl"><Bot className="w-4 h-4" /> Transcribe</button>
+                       }} className="px-6 py-2.5 rounded-2xl text-xs font-black uppercase tracking-widest bg-blue-600 hover:bg-blue-700 text-white flex items-center gap-2 shadow-xl transition-all active:scale-95 disabled:opacity-50" disabled={state.processingStatus.total > 0 && !state.processingStatus.isComplete}><Bot className="w-4 h-4" /> Transcribe Selection</button>
                    </div>
                  )}
                  
@@ -683,9 +770,16 @@ export const App: React.FC = () => {
                  <div className="flex-1 overflow-auto p-8 custom-scrollbar">
                    <div className="max-w-[1500px] mx-auto grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-8">
                      {filteredPages.map(page => (
-                       <div key={page.id} className="bg-white rounded-[32px] border overflow-hidden group hover:border-blue-500 hover:shadow-2xl transition-all flex flex-col shadow-sm">
+                       <div key={page.id} className="bg-white rounded-[32px] border overflow-hidden group hover:border-blue-500 hover:shadow-2xl transition-all flex flex-col shadow-sm relative">
+                         {page.status === 'transcribing' && (
+                           <div className="absolute inset-0 z-10 bg-white/60 backdrop-blur-[2px] flex flex-col items-center justify-center p-6 text-center animate-in fade-in duration-300">
+                             <Loader2 className="w-10 h-10 text-blue-600 animate-spin mb-3" />
+                             <div className="text-[10px] font-black uppercase tracking-widest text-slate-900">Transcribing...</div>
+                             <div className="text-[8px] font-bold text-slate-500 uppercase mt-1">Gemini AI Pipeline</div>
+                           </div>
+                         )}
                          <div className="relative aspect-[4/5] overflow-hidden bg-slate-100 cursor-zoom-in" onClick={() => setZoomedPageId(page.id)}>
-                             <img src={page.previewUrl} alt={page.indexName} className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-110" style={{ transform: `rotate(${page.rotation || 0}deg)` }} />
+                             <img src={page.previewUrl} alt={page.indexName} className={`w-full h-full object-cover transition-transform duration-700 group-hover:scale-110 ${page.status === 'transcribing' ? 'grayscale opacity-50' : ''}`} style={{ transform: `rotate(${page.rotation || 0}deg)` }} />
                              <div className="absolute top-4 left-4 flex flex-col gap-2">
                                <div className="bg-white/95 backdrop-blur-sm px-3 py-1.5 rounded-xl text-[10px] font-black text-slate-800 shadow-xl uppercase">{page.indexName.split('-').pop()?.trim()}</div>
                                {page.productionMode && (
@@ -731,20 +825,39 @@ export const App: React.FC = () => {
                      ))}
                    </div>
                  </div>
+                 
+                 {/* Next Step Button */}
+                 <div className="bg-white border-t p-6 flex justify-center">
+                    <button 
+                      onClick={() => setState(s => ({ ...s, uiState: 'clustering' }))}
+                      className="px-8 py-4 bg-slate-900 text-white rounded-[24px] font-black uppercase italic tracking-tight text-sm shadow-2xl flex items-center gap-3 hover:bg-blue-600 transition-all active:scale-95 group"
+                    >
+                      Process Documents Index
+                      <ChevronRight className="w-5 h-5 group-hover:translate-x-1 transition-transform" />
+                    </button>
+                 </div>
                </div>
              )}
              {state.uiState === 'clustering' && (
                <div className="flex-1 flex flex-col overflow-hidden bg-slate-50">
-                 {renderCommonHeader(<button onClick={async () => { 
-                   setState(s => ({ ...s, clusters: [], reconciliationList: [], processingStatus: { total: state.files.length, processed: 0, currentStep: 'Running Gemini Cluster Analysis...', isComplete: false } })); 
-                   try { 
-                     const clusters = await clusterPages(state.files, state.tier); 
-                     setState(s => ({ ...s, clusters, reconciliationList: [], processingStatus: { ...s.processingStatus, isComplete: true } })); 
-                     syncReconciliation(); 
-                   } catch (e) { 
-                     alert("Clustering failed."); 
-                   } 
-                 }} className="bg-emerald-600 hover:bg-emerald-700 text-white px-5 py-2 rounded-xl text-xs font-black uppercase tracking-tight flex items-center gap-2 shadow-lg"><Sparkles className="w-4 h-4" /> AI Document Indexing</button>)}
+                 {renderCommonHeader(
+                    <div className="flex items-center gap-2">
+                        <button onClick={() => setState(s => ({ ...s, uiState: 'dashboard' }))} className="p-2.5 bg-white border border-slate-200 text-slate-500 hover:bg-slate-50 rounded-xl transition-all flex items-center gap-2 text-[10px] font-black uppercase tracking-widest">
+                            <ChevronLeft className="w-3.5 h-3.5" /> Back to Pages
+                        </button>
+                        <button onClick={async () => { 
+                            setState(s => ({ ...s, clusters: [], reconciliationList: [], processingStatus: { total: state.files.length, processed: 0, currentStep: 'Running Gemini Cluster Analysis...', isComplete: false } })); 
+                            try { 
+                                const clusters = await clusterPages(state.files, state.tier); 
+                                setState(s => ({ ...s, clusters, reconciliationList: [], processingStatus: { ...s.processingStatus, isComplete: true, processed: state.files.length } })); 
+                                syncReconciliation(); 
+                            } catch (e) { 
+                                alert("Clustering failed."); 
+                                setState(s => ({ ...s, processingStatus: { ...s.processingStatus, isComplete: true } }));
+                            } 
+                        }} className="bg-emerald-600 hover:bg-emerald-700 text-white px-5 py-2.5 rounded-xl text-xs font-black uppercase tracking-tight flex items-center gap-2 shadow-lg disabled:opacity-50" disabled={state.processingStatus.total > 0 && !state.processingStatus.isComplete}><Sparkles className="w-4 h-4" /> AI Document Indexing</button>
+                    </div>
+                 )}
                  <div className="flex-1 p-12 overflow-y-auto custom-scrollbar">
                    <div className="max-w-7xl mx-auto space-y-12">
                      {state.clusters.length === 0 && (
@@ -769,20 +882,43 @@ export const App: React.FC = () => {
                                  <div className="space-y-4">
                                    <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-2"><Send className="w-4 h-4 text-blue-500" /> From</h4>
                                    {c.senders && c.senders.length > 0 ? c.senders.map((s, i) => (
-                                     <div key={i} className="flex flex-col">
+                                     <div key={i} className="flex flex-col border-b border-slate-100 pb-2 last:border-0 last:pb-0">
                                        <span className="text-sm font-black italic text-slate-800">{s.name}</span>
-                                       {s.role && <span className="text-[10px] font-bold text-slate-400">{s.role}</span>}
+                                       <div className="flex flex-wrap gap-x-3 gap-y-1 mt-1">
+                                          {s.role && <span className="text-[10px] font-bold text-slate-400 uppercase flex items-center gap-1"><Briefcase className="w-3 h-3" /> {s.role}</span>}
+                                          {s.organizationCategory && <span className="text-[10px] font-bold text-blue-500 uppercase flex items-center gap-1"><Building className="w-3 h-3" /> {s.organizationCategory}</span>}
+                                          {s.nationality && <span className="text-[10px] font-black text-emerald-600 uppercase flex items-center gap-1"><Globe className="w-3 h-3" /> {s.nationality}</span>}
+                                       </div>
                                      </div>
                                    )) : <span className="text-xs italic text-slate-300">Unidentified Sender</span>}
                                  </div>
                                  <div className="space-y-4">
                                    <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-2"><Mail className="w-4 h-4 text-emerald-500" /> To</h4>
                                    {c.recipients && c.recipients.length > 0 ? c.recipients.map((r, i) => (
-                                     <div key={i} className="flex flex-col">
+                                     <div key={i} className="flex flex-col border-b border-slate-100 pb-2 last:border-0 last:pb-0">
                                        <span className="text-sm font-black italic text-slate-800">{r.name}</span>
-                                       {r.role && <span className="text-[10px] font-bold text-slate-400">{r.role}</span>}
+                                       <div className="flex flex-wrap gap-x-3 gap-y-1 mt-1">
+                                          {r.role && <span className="text-[10px] font-bold text-slate-400 uppercase flex items-center gap-1"><Briefcase className="w-3 h-3" /> {r.role}</span>}
+                                          {r.organizationCategory && <span className="text-[10px] font-bold text-blue-500 uppercase flex items-center gap-1"><Building className="w-3 h-3" /> {r.organizationCategory}</span>}
+                                          {r.nationality && <span className="text-[10px] font-black text-emerald-600 uppercase flex items-center gap-1"><Globe className="w-3 h-3" /> {r.nationality}</span>}
+                                       </div>
                                      </div>
                                    )) : <span className="text-xs italic text-slate-300">Unidentified Recipient</span>}
+                                 </div>
+                              </div>
+
+                              <div className="space-y-4 pt-4">
+                                 <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-2"><Users className="w-4 h-4 text-slate-500" /> Mentioned People</h4>
+                                 <div className="flex flex-wrap gap-3">
+                                    {c.entities?.people && c.entities.people.length > 0 ? c.entities.people.map((p, i) => (
+                                      <div key={i} className="px-4 py-2 bg-white border border-slate-200 rounded-2xl flex flex-col shadow-sm">
+                                         <span className="text-xs font-black text-slate-800">{p.name}</span>
+                                         <div className="flex gap-2 mt-1">
+                                            {p.nationality && <span className="text-[8px] font-black uppercase text-emerald-600">{p.nationality}</span>}
+                                            {p.organizationCategory && <span className="text-[8px] font-bold uppercase text-blue-500">{p.organizationCategory}</span>}
+                                         </div>
+                                      </div>
+                                    )) : <span className="text-xs italic text-slate-300">None detected</span>}
                                  </div>
                               </div>
                             </div>
@@ -795,9 +931,28 @@ export const App: React.FC = () => {
                  {editingClusterId && (
                    <ClusterEditor cluster={state.clusters.find(c => c.id === editingClusterId)!} onClose={() => setEditingClusterId(null)} onSave={(updated) => { setState(s => ({ ...s, clusters: s.clusters.map(c => c.id === updated.id ? updated : c) })); setEditingClusterId(null); syncReconciliation(); }} />
                  )}
+                 {/* Next Step Button */}
+                 <div className="bg-white border-t p-6 flex justify-center">
+                    <button 
+                      onClick={() => setState(s => ({ ...s, uiState: 'entities' }))}
+                      className="px-8 py-4 bg-slate-900 text-white rounded-[24px] font-black uppercase italic tracking-tight text-sm shadow-2xl flex items-center gap-3 hover:bg-blue-600 transition-all active:scale-95 group"
+                    >
+                      Research Index & Reconcile
+                      <ChevronRight className="w-5 h-5 group-hover:translate-x-1 transition-transform" />
+                    </button>
+                 </div>
                </div>
              )}
-             {state.uiState === 'entities' && renderUnifiedEntities()}
+             {state.uiState === 'entities' && (
+                <div className="flex-1 flex flex-col overflow-hidden">
+                    {renderCommonHeader(
+                        <button onClick={() => setState(s => ({ ...s, uiState: 'clustering' }))} className="p-2.5 bg-white border border-slate-200 text-slate-500 hover:bg-slate-50 rounded-xl transition-all flex items-center gap-2 text-[10px] font-black uppercase tracking-widest">
+                            <ChevronLeft className="w-3.5 h-3.5" /> Back to Documents
+                        </button>
+                    )}
+                    {renderUnifiedEntities()}
+                </div>
+             )}
           </div>
         </>
       )}
@@ -806,17 +961,17 @@ export const App: React.FC = () => {
           <div className="bg-white w-full h-full rounded-[56px] shadow-2xl overflow-hidden flex flex-col">
             <header className="p-10 border-b flex justify-between items-center shrink-0">
               <h3 className="text-2xl font-black italic uppercase">{expandedField.label}</h3>
-              <button onClick={() => setExpandedField(null)} className="p-4 hover:bg-slate-100 rounded-2xl"><X className="w-10 h-10 text-slate-400" /></button>
+              <button onClick={() => setExpandedField(null)} className="p-4 hover:bg-slate-100 rounded-2xl transition-all"><X className="w-10 h-10 text-slate-400 hover:text-slate-900" /></button>
             </header>
             <div className="flex-1 flex overflow-hidden">
                <div className="w-1/2 bg-slate-900 p-12 flex items-center justify-center overflow-auto">
-                 <img src={state.files.find(f => f.id === expandedField.pageId)?.previewUrl} alt="Preview" className="max-w-full max-h-full shadow-2xl rounded-lg" />
+                 <img src={state.files.find(f => f.id === expandedField.pageId)?.previewUrl} alt="Preview" className="max-w-full max-h-full shadow-2xl rounded-lg" style={{ transform: `rotate(${state.files.find(f => f.id === expandedField.pageId)?.rotation || 0}deg)` }} />
                </div>
                <div className="w-1/2 p-12 flex flex-col bg-white">
                   <textarea className="flex-1 border-2 border-slate-100 rounded-[40px] p-10 font-mono text-base outline-none focus:border-blue-500 bg-slate-50 shadow-inner leading-relaxed resize-none" value={(state.files.find(f => f.id === expandedField.pageId) as any)?.[expandedField.field] || ''} dir={getTextDirection((state.files.find(f => f.id === expandedField.pageId) as any)?.[expandedField.field] || '')} onChange={e => setState(s => ({ ...s, files: s.files.map(f => f.id === expandedField.pageId ? { ...f, [expandedField.field]: e.target.value } : f) }))} />
                   <div className="grid grid-cols-2 gap-4 mt-8">
-                    <button onClick={() => setExpandedField(null)} className="bg-slate-100 text-slate-500 py-5 rounded-[28px] font-black uppercase">Cancel</button>
-                    <button onClick={() => setExpandedField(null)} className="bg-slate-900 text-white py-5 rounded-[28px] font-black uppercase shadow-xl">Confirm Review</button>
+                    <button onClick={() => setExpandedField(null)} className="bg-slate-100 text-slate-500 py-5 rounded-[28px] font-black uppercase transition-all hover:bg-slate-200">Cancel</button>
+                    <button onClick={() => setExpandedField(null)} className="bg-slate-900 text-white py-5 rounded-[28px] font-black uppercase shadow-xl transition-all hover:bg-blue-600 active:scale-95">Confirm Review</button>
                   </div>
                </div>
             </div>
@@ -824,9 +979,9 @@ export const App: React.FC = () => {
         </div>
       )}
       {zoomedPageId && (
-        <div className="fixed inset-0 z-[110] bg-slate-900/98 backdrop-blur-2xl flex items-center justify-center p-12 cursor-zoom-out" onClick={() => setZoomedPageId(null)}><img src={state.files.find(f => f.id === zoomedPageId)?.previewUrl} alt="Zoomed" className="max-w-full max-h-full object-contain shadow-2xl rounded-sm" style={{ transform: `rotate(${state.files.find(f => f.id === zoomedPageId)?.rotation || 0}deg)` }} /></div>
+        <div className="fixed inset-0 z-[110] bg-slate-900/98 backdrop-blur-2xl flex items-center justify-center p-12 cursor-zoom-out" onClick={() => setZoomedPageId(null)}><img src={state.files.find(f => f.id === zoomedPageId)?.previewUrl} alt="Zoomed" className="max-w-full max-h-full object-contain shadow-2xl rounded-sm transition-transform" style={{ transform: `rotate(${state.files.find(f => f.id === zoomedPageId)?.rotation || 0}deg)` }} /></div>
       )}
-      <div className="fixed bottom-6 right-6 flex flex-col gap-2 pointer-events-none items-end">
+      <div className="fixed bottom-6 right-6 flex flex-col gap-2 pointer-events-none items-end z-50">
         <div className="pointer-events-auto group">
           <button onClick={() => { const json = generateFullJSON(projectTitle, archiveName || "Unassigned", state.userName || "Unknown", state.tier, null, state.files, state.clusters); downloadFile(json, `${projectTitle}_analysis.json`, 'application/json'); }} className="flex items-center gap-3 px-6 py-3 bg-white text-slate-900 border border-slate-200 rounded-full shadow-2xl hover:bg-slate-900 hover:text-white transition-all transform hover:-translate-y-1"><FileJson className="w-5 h-5 text-blue-500 group-hover:text-blue-400" /><span className="text-xs font-black uppercase tracking-widest">Export Full Analysis</span></button>
         </div>

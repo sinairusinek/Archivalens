@@ -245,18 +245,22 @@ export const clusterPages = async (pages: ArchivalPage[], tier: Tier): Promise<C
     Example: "Correspondence from Margery Fry to K.W. Blaxter" 
     - SENDER: Margery Fry
     - RECIPIENT: K.W. Blaxter
-    Failure to extract these names when present in the title is a MAJOR ERROR. If the transcription contains other names (Dear X, Yours Y), combine them.
+    Failure to extract these names when present in the title is a MAJOR ERROR.
 
     For EACH cluster:
     - title: Accurate descriptive title.
     - pageRange: e.g. "Page 1-3".
     - summary: 1-2 sentence description.
     - pageIds: array of IDs belonging to this cluster.
-    - senders: array of {name, role, organizationCategory}.
-    - recipients: array of {name, role, organizationCategory}.
-    - docTypes: MUST select from names in this list: [${docTypesSummary}].
-    - subjects: select from: [${SUBJECTS_LIST.join('|')}].
-    - entities: list people, organizations, and roles mentioned in text.
+    - senders: array of {name, role, organizationCategory, nationality}.
+    - recipients: array of {name, role, organizationCategory, nationality}.
+    - entities: list people mentioned in text including {name, organizationCategory, nationality}.
+
+    NATIONALITY REQUIREMENT: For all people (senders, recipients, mentioned entities), identify nationality from text. Select ONLY from: "Arab", "British", "German", "Jew", "Other".
+    ORGANIZATIONAL CATEGORY: Identify the type of organization they are affiliated with if mentioned.
+
+    DOC TYPES: MUST select from names in this list: [${docTypesSummary}].
+    SUBJECTS: select from: [${SUBJECTS_LIST.join('|')}].
 
     REFERENCE VOCABULARY: [${vocabSummary.slice(0, 30000)}]
     PRISON LIST: ${PRISON_LIST.join('|')}
@@ -294,7 +298,8 @@ export const clusterPages = async (pages: ArchivalPage[], tier: Tier): Promise<C
                   properties: { 
                     name: { type: Type.STRING }, 
                     role: { type: Type.STRING },
-                    organizationCategory: { type: Type.STRING }
+                    organizationCategory: { type: Type.STRING },
+                    nationality: { type: Type.STRING, description: 'Select: Arab, British, German, Jew, Other' }
                   },
                   required: ["name"]
                 } 
@@ -306,7 +311,8 @@ export const clusterPages = async (pages: ArchivalPage[], tier: Tier): Promise<C
                   properties: { 
                     name: { type: Type.STRING }, 
                     role: { type: Type.STRING },
-                    organizationCategory: { type: Type.STRING }
+                    organizationCategory: { type: Type.STRING },
+                    nationality: { type: Type.STRING, description: 'Select: Arab, British, German, Jew, Other' }
                   },
                   required: ["name"]
                 } 
@@ -314,7 +320,17 @@ export const clusterPages = async (pages: ArchivalPage[], tier: Tier): Promise<C
               entities: { 
                 type: Type.OBJECT, 
                 properties: { 
-                  people: { type: Type.ARRAY, items: { type: Type.STRING } }, 
+                  people: { 
+                    type: Type.ARRAY, 
+                    items: { 
+                        type: Type.OBJECT,
+                        properties: {
+                            name: { type: Type.STRING },
+                            organizationCategory: { type: Type.STRING },
+                            nationality: { type: Type.STRING, description: 'Select: Arab, British, German, Jew, Other' }
+                        }
+                    }
+                  }, 
                   organizations: { type: Type.ARRAY, items: { type: Type.STRING } }, 
                   roles: { type: Type.ARRAY, items: { type: Type.STRING } } 
                 },
@@ -335,7 +351,7 @@ export const clusterPages = async (pages: ArchivalPage[], tier: Tier): Promise<C
       senders: (c.senders || []).map((s: any) => ({ ...s, id: matchInVocabulary(s.name) })),
       recipients: (c.recipients || []).map((r: any) => ({ ...r, id: matchInVocabulary(r.name) })),
       entities: {
-        people: (c.entities?.people || []).map((name: string) => ({ name: String(name), id: matchInVocabulary(String(name)) })),
+        people: (c.entities?.people || []).map((p: any) => ({ ...p, name: String(p.name), id: matchInVocabulary(String(p.name)) })),
         organizations: (c.entities?.organizations || []).map((name: string) => ({ name: String(name), id: matchInVocabulary(String(name)) })),
         roles: (c.entities?.roles || []).map((name: string) => ({ name: String(name), id: matchInVocabulary(String(name)) })),
       }
