@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   FolderOpen, FileText, Settings, Play, Download, CheckCircle, Loader2, Maximize2, X, Flag, CheckSquare, Square, Info, 
   Languages, FileUp, Edit3, Bot, ZoomIn, ZoomOut, Type, MapPin, Users, Building, Calendar, Mail, User, Filter, Cloud, Code, 
@@ -8,13 +8,13 @@ import {
   ChevronRight, PanelLeft, StickyNote, Activity, PieChart, Database, ListFilter, Briefcase as RoleIcon, Plus, Link as LinkIcon, Link2Off,
   FileSpreadsheet, ShieldCheck, Star, Fingerprint, History, Check, UserMinus, UserPlus, Save as SaveIcon, BookOpen, Layers,
   ChevronDown as ChevronDownIcon, FileSearch, GraduationCap, FlagTriangleLeft, HandMetal, Heart, Landmark, Send, UserCircle, Eye,
-  RefreshCw, Maximize, Minimize, User as UserIcon, Zap, Cpu, AlertCircle, ChevronLeft
+  RefreshCw, Maximize, Minimize, User as UserIcon, Zap, Cpu, AlertCircle, ChevronLeft, Trash
 } from 'lucide-react';
 import { ArchivalPage, AppState, AnalysisMode, Tier, ProcessingStatus, Cluster, Correspondent, EntityReference, NamedEntities, ReconciliationRecord, SourceAppearance, DocType } from '../types';
 import { analyzePageContent, transcribeAndTranslatePage, clusterPages } from '../services/geminiService';
 import { listFilesFromDrive, fetchFileFromDrive, uploadFileToDrive } from '../services/googleDriveService';
 import { generateTSV, generateClustersTSV, generateVocabularyCSV, generateMasterVocabularyCSV, generateFullJSON, generateProjectBackup, generateProjectZip, downloadFile } from '../utils/fileUtils';
-import { CONTROLLED_VOCABULARY, SUBJECTS_LIST, DOCUMENT_TYPES } from '../services/vocabulary';
+import { CONTROLLED_VOCABULARY, SUBJECTS_LIST, DOCUMENT_TYPES, PRISON_MASTER_LIST } from '../services/vocabulary';
 
 const PRESET_ARCHIVES = [
   "CAHJP - Central Archives for the History of the Jewish People (Magnes)",
@@ -29,6 +29,8 @@ const PRESET_ARCHIVES = [
   "TAMA - Tel Aviv Municipal Archives"
 ];
 
+const NATIONALITIES = ["Arab", "British", "German", "Jew", "Other"];
+
 const INITIAL_STATE: AppState = {
   apiKey: process.env.API_KEY || null,
   userName: "",
@@ -41,6 +43,314 @@ const INITIAL_STATE: AppState = {
   processingStatus: { total: 0, processed: 0, currentStep: 'idle', isComplete: false },
   uiState: 'welcome',
   archiveName: "",
+};
+
+const TagInput: React.FC<{ 
+  items: string[]; 
+  onAdd: (item: string) => void; 
+  onRemove: (idx: number) => void; 
+  placeholder?: string;
+  label?: string;
+}> = ({ items, onAdd, onRemove, placeholder, label }) => {
+  const [val, setVal] = useState("");
+  return (
+    <div className="space-y-3">
+      {label && <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">{label}</label>}
+      <div className="flex flex-wrap gap-2 min-h-[44px] p-2 bg-slate-50 border border-slate-200 rounded-2xl">
+        {items.map((item, i) => (
+          <span key={i} className="px-3 py-1 bg-white border rounded-xl text-xs font-bold flex items-center gap-2 group">
+            {item}
+            <button onClick={() => onRemove(i)} className="text-slate-300 hover:text-red-500 transition-colors"><X className="w-3 h-3" /></button>
+          </span>
+        ))}
+        <input 
+          type="text" 
+          value={val} 
+          onChange={e => setVal(e.target.value)} 
+          onKeyDown={e => { if(e.key === 'Enter' && val) { e.preventDefault(); onAdd(val); setVal(""); } }}
+          placeholder={placeholder}
+          className="flex-1 min-w-[120px] bg-transparent outline-none text-xs font-bold p-1" 
+        />
+      </div>
+    </div>
+  );
+};
+
+const CorrespondentListEditor: React.FC<{ 
+  correspondents: Correspondent[]; 
+  onChange: (updated: Correspondent[]) => void; 
+  label: string;
+  icon: React.ReactNode;
+}> = ({ correspondents, onChange, label, icon }) => {
+  const add = () => onChange([...correspondents, { name: "", role: "", nationality: "Other", organizationCategory: "" }]);
+  const remove = (idx: number) => onChange(correspondents.filter((_, i) => i !== idx));
+  const update = (idx: number, patch: Partial<Correspondent>) => onChange(correspondents.map((c, i) => i === idx ? { ...c, ...patch } : c));
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-2">{icon} {label}</label>
+        <button onClick={add} className="p-1 bg-blue-50 text-blue-600 rounded-lg hover:bg-blue-600 hover:text-white transition-all"><Plus className="w-4 h-4" /></button>
+      </div>
+      <div className="space-y-3">
+        {correspondents.map((c, i) => (
+          <div key={i} className="p-4 bg-slate-50 rounded-2xl border flex flex-col gap-3 group relative">
+            <button onClick={() => remove(i)} className="absolute -top-2 -right-2 p-1.5 bg-white border border-slate-200 text-slate-400 hover:text-red-500 rounded-full opacity-0 group-hover:opacity-100 transition-all shadow-sm"><Trash className="w-3 h-3" /></button>
+            <input 
+              placeholder="Name" 
+              className="bg-white border rounded-xl px-3 py-1.5 text-xs font-black outline-none focus:border-blue-500" 
+              value={c.name} onChange={e => update(i, { name: e.target.value })} 
+            />
+            <div className="grid grid-cols-2 gap-2">
+              <input 
+                placeholder="Role" 
+                className="bg-white border rounded-xl px-3 py-1.5 text-[10px] font-bold outline-none" 
+                value={c.role} onChange={e => update(i, { role: e.target.value })} 
+              />
+              <select 
+                className="bg-white border rounded-xl px-3 py-1.5 text-[10px] font-bold outline-none" 
+                value={c.nationality} onChange={e => update(i, { nationality: e.target.value })}
+              >
+                {NATIONALITIES.map(n => <option key={n} value={n}>{n}</option>)}
+              </select>
+            </div>
+            <input 
+              placeholder="Organization Category" 
+              className="bg-white border rounded-xl px-3 py-1.5 text-[10px] font-bold outline-none" 
+              value={c.organizationCategory} onChange={e => update(i, { organizationCategory: e.target.value })} 
+            />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+const EntityListEditor: React.FC<{ 
+  entities: EntityReference[]; 
+  onChange: (updated: EntityReference[]) => void; 
+  label: string;
+  type: 'person' | 'organization' | 'prison' | 'role';
+}> = ({ entities, onChange, label, type }) => {
+  const add = () => onChange([...entities, { name: "", type }]);
+  const remove = (idx: number) => onChange(entities.filter((_, i) => i !== idx));
+  const update = (idx: number, patch: Partial<EntityReference>) => onChange(entities.map((e, i) => i === idx ? { ...e, ...patch } : e));
+
+  const handlePrisonSelect = (idx: number, prisonName: string) => {
+    const master = PRISON_MASTER_LIST.find(p => p.name === prisonName);
+    update(idx, { name: prisonName, id: master?.id });
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">{label}</label>
+        <button onClick={add} className="p-1 bg-slate-100 text-slate-500 rounded-lg hover:bg-slate-900 hover:text-white transition-all"><Plus className="w-4 h-4" /></button>
+      </div>
+      <div className="space-y-2">
+        {entities.map((ent, i) => (
+          <div key={i} className="bg-slate-50 rounded-xl border p-3 flex flex-col gap-2 group relative">
+            <button onClick={() => remove(i)} className="absolute top-2 right-2 p-1 text-slate-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-all"><X className="w-3.5 h-3.5" /></button>
+            
+            {type === 'prison' ? (
+              <div className="flex flex-col gap-1">
+                <select 
+                  className="bg-white border rounded-lg px-2 py-1 text-xs font-bold outline-none" 
+                  value={ent.name || ""} 
+                  onChange={e => handlePrisonSelect(i, e.target.value)}
+                >
+                  <option value="">-- Select Master Prison or Add New --</option>
+                  {PRISON_MASTER_LIST.map(p => <option key={p.id} value={p.name}>{p.name} (ID: {p.id})</option>)}
+                  {ent.name && !PRISON_MASTER_LIST.some(p => p.name === ent.name) && <option value={ent.name}>{ent.name} (Custom)</option>}
+                </select>
+                <input 
+                  placeholder="Or type custom prison name..." 
+                  className="bg-white border rounded-lg px-2 py-1 text-[10px] outline-none" 
+                  value={ent.name} 
+                  onChange={e => update(i, { name: e.target.value, id: PRISON_MASTER_LIST.find(p => p.name === e.target.value)?.id })} 
+                />
+              </div>
+            ) : (
+              <input 
+                placeholder="Name" 
+                className="bg-white border rounded-lg px-2 py-1 text-xs font-bold outline-none" 
+                value={ent.name} onChange={e => update(i, { name: e.target.value })} 
+              />
+            )}
+
+            {type === 'person' && (
+              <div className="grid grid-cols-2 gap-2">
+                <select 
+                  className="bg-white border rounded-lg px-2 py-1 text-[10px] outline-none" 
+                  value={ent.nationality} onChange={e => update(i, { nationality: e.target.value })}
+                >
+                  <option value="">Nationality</option>
+                  {NATIONALITIES.map(n => <option key={n} value={n}>{n}</option>)}
+                </select>
+                <input 
+                  placeholder="Category" 
+                  className="bg-white border rounded-lg px-2 py-1 text-[10px] outline-none" 
+                  value={ent.organizationCategory} onChange={e => update(i, { organizationCategory: e.target.value })} 
+                />
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+const ClusterEditor: React.FC<{ 
+  cluster: Cluster; 
+  onClose: () => void; 
+  onSave: (updated: Cluster) => void;
+}> = ({ cluster, onClose, onSave }) => {
+  const [edited, setEdited] = React.useState<Cluster>({ ...cluster });
+
+  const handleSave = () => {
+    onSave(edited);
+  };
+
+  const updateEntities = (patch: Partial<NamedEntities>) => {
+    setEdited({
+      ...edited,
+      entities: {
+        people: edited.entities?.people || [],
+        organizations: edited.entities?.organizations || [],
+        roles: edited.entities?.roles || [],
+        prisons: edited.entities?.prisons || [],
+        ...patch
+      }
+    });
+  };
+
+  return (
+    <div className="fixed inset-0 z-[120] bg-slate-900/90 backdrop-blur-xl flex items-center justify-center p-8 overflow-hidden">
+      <div className="bg-white w-full max-w-6xl rounded-[48px] shadow-2xl overflow-hidden flex flex-col max-h-[95vh] animate-in zoom-in-95 duration-300">
+        <header className="p-8 border-b flex justify-between items-center shrink-0">
+          <div className="flex items-center gap-4">
+            <div className="bg-blue-600 text-white text-xs font-black px-5 py-2 rounded-2xl uppercase flex items-center gap-2 shadow-lg">
+              <Bot className="w-4 h-4" /> Cluster #{cluster.id}
+            </div>
+            <h3 className="text-2xl font-black italic uppercase tracking-tight text-slate-800">Metadata Studio</h3>
+          </div>
+          <button onClick={onClose} className="p-2 hover:bg-slate-100 rounded-2xl transition-all"><X className="w-7 h-7 text-slate-400" /></button>
+        </header>
+        
+        <div className="flex-1 overflow-y-auto p-12 custom-scrollbar grid grid-cols-1 lg:grid-cols-12 gap-16">
+          <div className="lg:col-span-4 space-y-10">
+            <div className="space-y-4">
+              <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-2">
+                <Type className="w-4 h-4" /> Document Title
+              </label>
+              <input 
+                type="text" 
+                className="w-full bg-slate-50 border border-slate-200 rounded-2xl p-5 text-sm font-bold outline-none focus:border-blue-500 transition-all shadow-inner" 
+                value={edited.title} 
+                onChange={e => setEdited({ ...edited, title: e.target.value })} 
+              />
+            </div>
+            
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-4">
+                <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-2">
+                  <Calendar className="w-4 h-4" /> Standardized Date
+                </label>
+                <input 
+                  type="text" 
+                  placeholder="YYYY-MM-DD"
+                  className="w-full bg-slate-50 border border-slate-200 rounded-2xl p-4 text-xs font-bold outline-none focus:border-blue-500 transition-all shadow-inner" 
+                  value={edited.standardizedDate || ''} 
+                  onChange={e => setEdited({ ...edited, standardizedDate: e.target.value })} 
+                />
+              </div>
+              <div className="space-y-4">
+                <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-2">
+                  <MapPin className="w-4 h-4" /> Original Date Text
+                </label>
+                <input 
+                  type="text" 
+                  className="w-full bg-slate-50 border border-slate-200 rounded-2xl p-4 text-xs font-bold outline-none focus:border-blue-500 transition-all shadow-inner" 
+                  value={edited.originalDate || ''} 
+                  onChange={e => setEdited({ ...edited, originalDate: e.target.value })} 
+                />
+              </div>
+            </div>
+
+            <div className="space-y-4">
+              <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-2">
+                <StickyNote className="w-4 h-4" /> Executive Summary
+              </label>
+              <textarea 
+                className="w-full bg-slate-50 border border-slate-200 rounded-[32px] p-6 text-sm font-medium outline-none focus:border-blue-500 h-48 resize-none shadow-inner leading-relaxed" 
+                value={edited.summary} 
+                onChange={e => setEdited({ ...edited, summary: e.target.value })} 
+              />
+            </div>
+
+            <TagInput 
+              label="Subjects" 
+              items={edited.subjects || []} 
+              onAdd={s => setEdited({ ...edited, subjects: [...(edited.subjects || []), s] })} 
+              onRemove={idx => setEdited({ ...edited, subjects: (edited.subjects || []).filter((_, i) => i !== idx) })} 
+              placeholder="Press Enter to add..."
+            />
+          </div>
+
+          <div className="lg:col-span-4 space-y-10 border-x px-8">
+            <h4 className="text-xl font-black italic uppercase text-slate-900 border-b pb-4">Correspondence</h4>
+            <CorrespondentListEditor 
+              label="Senders (From)" 
+              correspondents={edited.senders || []} 
+              icon={<Send className="w-3.5 h-3.5" />}
+              onChange={s => setEdited({ ...edited, senders: s })} 
+            />
+            <CorrespondentListEditor 
+              label="Recipients (To)" 
+              correspondents={edited.recipients || []} 
+              icon={<Mail className="w-3.5 h-3.5" />}
+              onChange={r => setEdited({ ...edited, recipients: r })} 
+            />
+          </div>
+
+          <div className="lg:col-span-4 space-y-10">
+            <h4 className="text-xl font-black italic uppercase text-slate-900 border-b pb-4">Mentioned Entities</h4>
+            <div className="grid grid-cols-1 gap-8">
+              <EntityListEditor 
+                label="People Mentioned" 
+                type="person" 
+                entities={edited.entities?.people || []} 
+                onChange={p => updateEntities({ people: p })} 
+              />
+              <EntityListEditor 
+                label="Organizations Mentioned" 
+                type="organization" 
+                entities={edited.entities?.organizations || []} 
+                onChange={o => updateEntities({ organizations: o })} 
+              />
+              <EntityListEditor 
+                label="Prisons Mentioned" 
+                type="prison" 
+                entities={edited.entities?.prisons || []} 
+                onChange={p => updateEntities({ prisons: p })} 
+              />
+            </div>
+          </div>
+        </div>
+
+        <footer className="p-8 border-t bg-slate-50/50 flex gap-4 shrink-0">
+          <button onClick={onClose} className="flex-1 py-5 bg-white border border-slate-200 text-slate-500 rounded-3xl font-black uppercase text-xs tracking-widest hover:bg-slate-100 transition-all">Discard Changes</button>
+          <button 
+            onClick={handleSave} 
+            className="flex-[2] py-5 bg-slate-900 text-white rounded-3xl font-black uppercase text-xs tracking-widest hover:bg-blue-600 transition-all shadow-2xl active:scale-95"
+          >
+            Update Project Metadata
+          </button>
+        </footer>
+      </div>
+    </div>
+  );
 };
 
 const getTextDirection = (text: string | undefined): 'rtl' | 'ltr' => {
@@ -81,92 +391,7 @@ const ProcessingBanner: React.FC<{ status: ProcessingStatus }> = ({ status }) =>
   );
 };
 
-const ClusterEditor: React.FC<{ 
-  cluster: Cluster; 
-  onClose: () => void; 
-  onSave: (updated: Cluster) => void;
-}> = ({ cluster, onClose, onSave }) => {
-  const [edited, setEdited] = React.useState<Cluster>({ ...cluster });
-
-  const handleSave = () => {
-    onSave(edited);
-  };
-
-  return (
-    <div className="fixed inset-0 z-[120] bg-slate-900/90 backdrop-blur-xl flex items-center justify-center p-8 overflow-y-auto">
-      <div className="bg-white w-full max-w-4xl rounded-[48px] shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
-        <header className="p-8 border-b flex justify-between items-center shrink-0">
-          <div className="flex items-center gap-3">
-            <div className="bg-blue-600 text-white text-xs font-black px-4 py-1.5 rounded-full uppercase flex items-center gap-2">
-              <Bot className="w-3.5 h-3.5" /> Doc #{cluster.id}
-            </div>
-            <h3 className="text-xl font-black italic uppercase tracking-tight text-slate-800">Metadata Editor</h3>
-          </div>
-          <button onClick={onClose} className="p-2 hover:bg-slate-100 rounded-xl transition-all"><X className="w-6 h-6 text-slate-400" /></button>
-        </header>
-        <div className="flex-1 overflow-y-auto p-10 space-y-10 custom-scrollbar">
-          <div className="space-y-4">
-            <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-2">
-              <Type className="w-3.5 h-3.5" /> Document Title
-            </label>
-            <input 
-              type="text" 
-              className="w-full bg-slate-50 border border-slate-200 rounded-2xl p-5 text-sm font-bold outline-none focus:border-blue-500 transition-all shadow-inner" 
-              value={edited.title} 
-              onChange={e => setEdited({ ...edited, title: e.target.value })} 
-            />
-          </div>
-          <div className="space-y-4">
-            <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-2">
-              <StickyNote className="w-3.5 h-3.5" /> AI Summary
-            </label>
-            <textarea 
-              className="w-full bg-slate-50 border border-slate-200 rounded-3xl p-6 text-sm font-medium outline-none focus:border-blue-500 h-40 resize-none shadow-inner leading-relaxed" 
-              value={edited.summary} 
-              onChange={e => setEdited({ ...edited, summary: e.target.value })} 
-            />
-          </div>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-            <div className="space-y-4">
-              <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-2">
-                <MapPin className="w-3.5 h-3.5" /> Prison / Location
-              </label>
-              <input 
-                type="text" 
-                className="w-full bg-slate-50 border border-slate-200 rounded-2xl p-5 text-sm font-bold outline-none focus:border-blue-500 transition-all shadow-inner" 
-                value={edited.prisonName || ''} 
-                onChange={e => setEdited({ ...edited, prisonName: e.target.value })} 
-              />
-            </div>
-            <div className="space-y-4">
-              <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-2">
-                <Calendar className="w-3.5 h-3.5" /> Standardized Date
-              </label>
-              <input 
-                type="text" 
-                placeholder="YYYY-MM-DD"
-                className="w-full bg-slate-50 border border-slate-200 rounded-2xl p-5 text-sm font-bold outline-none focus:border-blue-500 transition-all shadow-inner" 
-                value={edited.standardizedDate || ''} 
-                onChange={e => setEdited({ ...edited, standardizedDate: e.target.value })} 
-              />
-            </div>
-          </div>
-        </div>
-        <footer className="p-8 border-t bg-slate-50/50 flex gap-4 shrink-0">
-          <button onClick={onClose} className="flex-1 py-4 bg-white border border-slate-200 text-slate-500 rounded-[20px] font-black uppercase text-[10px] tracking-widest hover:bg-slate-100 transition-all">Discard Changes</button>
-          <button 
-            onClick={handleSave} 
-            className="flex-1 py-4 bg-slate-900 text-white rounded-[20px] font-black uppercase text-[10px] tracking-widest hover:bg-blue-600 transition-all shadow-xl active:scale-95"
-          >
-            Apply Metadata
-          </button>
-        </footer>
-      </div>
-    </div>
-  );
-};
-
-export const App: React.FC = () => {
+const App: React.FC = () => {
   const [state, setState] = useState<AppState>(INITIAL_STATE);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [zoomedPageId, setZoomedPageId] = useState<string | null>(null);
@@ -192,7 +417,7 @@ export const App: React.FC = () => {
   const [indexSubTab, setIndexSubTab] = useState<'project' | 'master'>('project');
   const [recSearch, setRecSearch] = useState("");
   const [activeRecId, setActiveRecId] = useState<string | null>(null);
-  const [recFilterType, setRecFilterType] = useState<'all' | 'person' | 'organization' | 'role'>('all');
+  const [recFilterType, setRecFilterType] = useState<'all' | 'person' | 'organization' | 'role' | 'prison'>('all');
 
   useEffect(() => {
     if (state.files.length > 0 && !rangeEnd) {
@@ -325,7 +550,7 @@ export const App: React.FC = () => {
     const existingMap = new Map<string, ReconciliationRecord>();
     state.reconciliationList.forEach(r => existingMap.set(`${r.type}:${r.extractedName.toLowerCase()}`, r));
 
-    const add = (name: string, type: 'person' | 'organization' | 'role', source: string) => {
+    const add = (name: string, type: 'person' | 'organization' | 'role' | 'prison', source: string) => {
       if (!name) return;
       const key = `${type}:${name.toLowerCase()}`;
       if (uniqueMap.has(key)) {
@@ -341,7 +566,7 @@ export const App: React.FC = () => {
           extractedName: name,
           type,
           matchedId: vocabMatch.id,
-          matchedName: vocabMatch.id ? state.masterVocabulary.find(v => v.id === vocabMatch.id)?.name : undefined,
+          matchedName: vocabMatch.id ? (state.masterVocabulary.find(v => v.id === vocabMatch.id)?.name || PRISON_MASTER_LIST.find(p => p.id === vocabMatch.id)?.name) : undefined,
           status: vocabMatch.id ? 'matched' : (prev?.status || 'pending'),
           sourceAppearances: prev?.sourceAppearances && prev.sourceAppearances.length > 0 ? prev.sourceAppearances : [{ id: source, note: "" }],
           addedAt: prev?.addedAt || new Date().toISOString().split('T')[0]
@@ -353,6 +578,7 @@ export const App: React.FC = () => {
       c.entities?.people?.forEach(p => add(p.name, 'person', `Doc #${c.id}`));
       c.entities?.organizations?.forEach(o => add(o.name, 'organization', `Doc #${c.id}`));
       c.entities?.roles?.forEach(r => add(r.name, 'role', `Doc #${c.id}`));
+      c.entities?.prisons?.forEach(p => add(p.name, 'prison', `Doc #${c.id}`));
       c.senders?.forEach(s => add(s.name, 'person', `Doc #${c.id}`));
       c.recipients?.forEach(r => add(r.name, 'person', `Doc #${c.id}`));
     });
@@ -361,6 +587,7 @@ export const App: React.FC = () => {
       f.entities?.people?.forEach(p => add(p.name, 'person', f.indexName));
       f.entities?.organizations?.forEach(o => add(o.name, 'organization', f.indexName));
       f.entities?.roles?.forEach(r => add(r.name, 'role', f.indexName));
+      f.entities?.prisons?.forEach(p => add(p.name, 'prison', f.indexName));
     });
 
     setState(s => ({ ...s, reconciliationList: Array.from(uniqueMap.values()) }));
@@ -369,7 +596,9 @@ export const App: React.FC = () => {
   const resolveEntity = (name: string): EntityReference => {
     const low = name.toLowerCase().trim();
     const match = state.masterVocabulary.find(v => v.name.toLowerCase() === low);
-    return { name, id: match?.id };
+    if (match) return { name, id: match.id };
+    const prisonMatch = PRISON_MASTER_LIST.find(p => p.name.toLowerCase() === low);
+    return { name, id: prisonMatch?.id };
   };
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>, mode: AnalysisMode) => {
@@ -550,18 +779,30 @@ export const App: React.FC = () => {
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
               <input type="text" placeholder="Search entities..." className="w-full bg-slate-50 border rounded-xl py-2 pl-10 pr-4 text-xs font-bold outline-none focus:border-blue-500" value={recSearch} onChange={e => setRecSearch(e.target.value)} />
             </div>
+            <div className="flex gap-2 overflow-x-auto pb-1 no-scrollbar">
+               {['all', 'person', 'organization', 'prison', 'role'].map(type => (
+                 <button key={type} onClick={() => setRecFilterType(type as any)} className={`shrink-0 px-3 py-1 rounded-full text-[8px] font-black uppercase tracking-tighter border transition-all ${recFilterType === type ? 'bg-slate-900 text-white' : 'bg-white text-slate-400 border-slate-200'}`}>{type}</button>
+               ))}
+            </div>
           </div>
           <div className="flex-1 overflow-y-auto custom-scrollbar">
             {indexSubTab === 'project' ? (
-              filteredRecs.map(rec => (
-                <button key={rec.id} onClick={() => setActiveRecId(rec.id)} className={`w-full p-6 border-b text-left transition-all hover:bg-slate-50 ${activeRecId === rec.id ? 'bg-blue-50/50 border-l-4 border-l-blue-600' : ''}`}>
-                  <div className="flex justify-between items-start mb-1"><span className="text-[10px] font-black text-blue-600 uppercase tracking-widest">{rec.type}</span><span className={`text-[8px] font-black px-1.5 py-0.5 rounded border uppercase ${rec.status === 'matched' ? 'bg-emerald-50 text-emerald-600 border-emerald-100' : 'bg-amber-50 text-amber-600 border-amber-100'}`}>{rec.status}</span></div>
-                  <div className="text-sm font-black text-slate-800 mb-1">{rec.extractedName}</div>
-                </button>
-              ))
+              filteredRecs.length > 0 ? (
+                filteredRecs.map(rec => (
+                  <button key={rec.id} onClick={() => setActiveRecId(rec.id)} className={`w-full p-6 border-b text-left transition-all hover:bg-slate-50 ${activeRecId === rec.id ? 'bg-blue-50/50 border-l-4 border-l-blue-600' : ''}`}>
+                    <div className="flex justify-between items-start mb-1"><span className="text-[10px] font-black text-blue-600 uppercase tracking-widest">{rec.type}</span><span className={`text-[8px] font-black px-1.5 py-0.5 rounded border uppercase ${rec.status === 'matched' ? 'bg-emerald-50 text-emerald-600 border-emerald-100' : 'bg-amber-50 text-amber-600 border-amber-100'}`}>{rec.status}</span></div>
+                    <div className="text-sm font-black text-slate-800 mb-1">{rec.extractedName}</div>
+                    {rec.matchedName && <div className="text-[9px] text-slate-400 font-bold uppercase italic truncate">Matches: {rec.matchedName}</div>}
+                  </button>
+                ))
+              ) : (
+                <div className="p-12 text-center text-slate-300 italic text-xs font-bold">No project entities found.</div>
+              )
             ) : (
-              state.masterVocabulary.filter(v => v.name.toLowerCase().includes(recSearch.toLowerCase())).slice(0, 100).map(v => (
-                  <div key={v.id} className="p-6 border-b hover:bg-slate-50"><div className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">{v.type}</div><div className="text-sm font-black text-slate-800">{v.name}</div></div>
+              [...state.masterVocabulary, ...PRISON_MASTER_LIST.map(p => ({ ...p, type: 'prison' as const }))]
+                .filter(v => v.name.toLowerCase().includes(recSearch.toLowerCase()))
+                .slice(0, 100).map((v, idx) => (
+                  <div key={idx} className="p-6 border-b hover:bg-slate-50"><div className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">{v.type || 'prison'}</div><div className="text-sm font-black text-slate-800">{v.name}</div><div className="text-[8px] text-slate-300">ID: {v.id}</div></div>
                 ))
             )}
           </div>
@@ -573,12 +814,33 @@ export const App: React.FC = () => {
                   <div className="px-4 py-1.5 bg-blue-600 text-white rounded-full text-[10px] font-black uppercase tracking-widest w-fit">{activeRec.type}</div>
                   <h2 className="text-5xl font-black text-slate-900 italic uppercase tracking-tighter leading-tight">{activeRec.extractedName}</h2>
                 </header>
-                <div className="bg-white p-8 rounded-[40px] border shadow-sm space-y-6">
-                  <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-2"><Eye className="w-4 h-4" /> Source Appearances</h4>
-                  <div className="space-y-3">
-                    {activeRec.sourceAppearances.map((app, idx) => (
-                      <div key={idx} className="flex items-center justify-between p-4 bg-slate-50 rounded-2xl border border-slate-100"><div className="text-[11px] font-black text-slate-700">{app.id}</div></div>
-                    ))}
+                
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                  <div className="bg-white p-8 rounded-[40px] border shadow-sm space-y-6">
+                    <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-2"><CheckCircle className="w-4 h-4" /> Authority Match</h4>
+                    {activeRec.matchedName ? (
+                      <div className="space-y-4">
+                        <div className="p-6 bg-emerald-50 rounded-3xl border border-emerald-100">
+                          <div className="text-[10px] font-black text-emerald-600 uppercase tracking-widest mb-1">Standardized Name</div>
+                          <div className="text-xl font-black text-slate-800">{activeRec.matchedName}</div>
+                          <div className="text-xs text-emerald-500 font-bold mt-1">Authority ID: {activeRec.matchedId}</div>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="p-6 bg-slate-50 rounded-3xl border border-dashed text-slate-400 text-xs font-bold text-center">Unmatched to Authority Vocabulary</div>
+                    )}
+                  </div>
+
+                  <div className="bg-white p-8 rounded-[40px] border shadow-sm space-y-6">
+                    <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-2"><Eye className="w-4 h-4" /> Source Appearances</h4>
+                    <div className="space-y-3">
+                      {activeRec.sourceAppearances.map((app, idx) => (
+                        <div key={idx} className="flex items-center justify-between p-4 bg-slate-50 rounded-2xl border border-slate-100">
+                          <div className="text-[11px] font-black text-slate-700">{app.id}</div>
+                          <Bot className="w-3.5 h-3.5 text-slate-300" />
+                        </div>
+                      ))}
+                    </div>
                   </div>
                 </div>
              </div>
@@ -706,7 +968,6 @@ export const App: React.FC = () => {
                            const concurrency = state.tier === Tier.PAID ? 5 : 1;
                            for (let i = 0; i < toProc.length; i += concurrency) {
                              const batch = toProc.slice(i, i + concurrency);
-                             // Set batch pages to transcribing state
                              setState(prev => ({
                                ...prev,
                                files: prev.files.map(f => batch.some(bp => bp.id === f.id) ? { ...f, status: 'transcribing' } : f)
@@ -727,7 +988,6 @@ export const App: React.FC = () => {
                    </div>
                  )}
                  
-                 {/* Selection & Range Bar */}
                  <div className="bg-white border-b px-8 py-3 flex flex-wrap items-center justify-between gap-4">
                     <div className="flex items-center gap-6">
                       <label className="flex items-center gap-2 cursor-pointer group">
@@ -826,7 +1086,6 @@ export const App: React.FC = () => {
                    </div>
                  </div>
                  
-                 {/* Next Step Button */}
                  <div className="bg-white border-t p-6 flex justify-center">
                     <button 
                       onClick={() => setState(s => ({ ...s, uiState: 'clustering' }))}
@@ -871,13 +1130,17 @@ export const App: React.FC = () => {
                      )}
                      {state.clusters.map(c => (
                        <div key={c.id} className="bg-white rounded-[40px] border overflow-hidden shadow-sm hover:shadow-2xl transition-all p-12 group relative">
-                         <button onClick={() => setEditingClusterId(c.id)} className="absolute top-12 right-12 p-3.5 bg-slate-50 text-slate-400 hover:bg-slate-900 hover:text-white rounded-2xl transition-all opacity-0 group-hover:opacity-100"><Edit3 className="w-5 h-5" /></button>
+                         <button onClick={() => setEditingClusterId(c.id)} className="absolute top-12 right-12 p-3.5 bg-slate-50 text-slate-400 hover:bg-slate-900 hover:text-white rounded-2xl transition-all opacity-0 group-hover:opacity-100 shadow-sm"><Edit3 className="w-5 h-5" /></button>
                          <div className="flex items-center gap-3 mb-8"><div className="bg-blue-600 text-white text-xs font-black px-5 py-1.5 rounded-full uppercase">Doc #{c.id}</div><div className="text-slate-300 font-black uppercase text-[10px] tracking-widest">{c.pageRange}</div></div>
                          <div className="grid grid-cols-1 lg:grid-cols-12 gap-16">
-                            <div className="lg:col-span-8 space-y-8">
+                            <div className="lg:col-span-12 space-y-8">
                               <h3 className="text-3xl font-black text-slate-800 leading-tight tracking-tight">{c.title}</h3>
-                              <div className="flex flex-wrap gap-2">{c.docTypes?.map(dt => <span key={dt.id} className="px-3 py-1 bg-slate-100 text-slate-600 rounded-xl text-[9px] font-black uppercase tracking-widest border"> {dt.name} <span className="opacity-40 text-[7px]">#{dt.id}</span> </span>)}</div>
+                              <div className="flex flex-wrap gap-2">
+                                {c.docTypes?.map(dt => <span key={dt.id} className="px-3 py-1 bg-slate-100 text-slate-600 rounded-xl text-[9px] font-black uppercase tracking-widest border"> {dt.name} <span className="opacity-40 text-[7px]">#{dt.id}</span> </span>)}
+                                {c.prisonName && <span className="px-3 py-1 bg-emerald-50 text-emerald-700 border-emerald-100 rounded-xl text-[9px] font-black uppercase tracking-widest border flex items-center gap-1"><MapPin className="w-2.5 h-2.5" /> {c.prisonName}</span>}
+                              </div>
                               <p className="text-slate-500 leading-relaxed text-base font-medium italic border-l-4 pl-6">{c.summary}</p>
+                              
                               <div className="grid grid-cols-1 md:grid-cols-2 gap-6 bg-slate-50/50 p-8 rounded-[32px] border">
                                  <div className="space-y-4">
                                    <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-2"><Send className="w-4 h-4 text-blue-500" /> From</h4>
@@ -907,18 +1170,43 @@ export const App: React.FC = () => {
                                  </div>
                               </div>
 
-                              <div className="space-y-4 pt-4">
-                                 <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-2"><Users className="w-4 h-4 text-slate-500" /> Mentioned People</h4>
-                                 <div className="flex flex-wrap gap-3">
-                                    {c.entities?.people && c.entities.people.length > 0 ? c.entities.people.map((p, i) => (
-                                      <div key={i} className="px-4 py-2 bg-white border border-slate-200 rounded-2xl flex flex-col shadow-sm">
-                                         <span className="text-xs font-black text-slate-800">{p.name}</span>
-                                         <div className="flex gap-2 mt-1">
-                                            {p.nationality && <span className="text-[8px] font-black uppercase text-emerald-600">{p.nationality}</span>}
-                                            {p.organizationCategory && <span className="text-[8px] font-bold uppercase text-blue-500">{p.organizationCategory}</span>}
-                                         </div>
-                                      </div>
-                                    )) : <span className="text-xs italic text-slate-300">None detected</span>}
+                              <div className="space-y-6 pt-4 border-t">
+                                 <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
+                                    <div className="space-y-3">
+                                       <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-2"><Users className="w-4 h-4 text-slate-500" /> Mentioned People</h4>
+                                       <div className="flex flex-wrap gap-2">
+                                          {c.entities?.people && c.entities.people.length > 0 ? c.entities.people.map((p, i) => (
+                                            <div key={i} className="px-3 py-1.5 bg-white border border-slate-200 rounded-xl flex flex-col shadow-sm">
+                                               <span className="text-[10px] font-black text-slate-800">{p.name}</span>
+                                               {(p.nationality || p.organizationCategory) && (
+                                                  <div className="flex gap-1.5 mt-0.5">
+                                                     {p.nationality && <span className="text-[7px] font-black uppercase text-emerald-600">{p.nationality}</span>}
+                                                     {p.organizationCategory && <span className="text-[7px] font-bold uppercase text-blue-500">{p.organizationCategory}</span>}
+                                                  </div>
+                                               )}
+                                            </div>
+                                          )) : <span className="text-xs italic text-slate-300">None detected</span>}
+                                       </div>
+                                    </div>
+                                    <div className="space-y-3">
+                                       <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-2"><Building className="w-4 h-4 text-slate-500" /> Mentioned Orgs</h4>
+                                       <div className="flex flex-wrap gap-2">
+                                          {c.entities?.organizations && c.entities.organizations.length > 0 ? c.entities.organizations.map((o, i) => (
+                                            <span key={i} className="px-3 py-1 bg-white border border-slate-200 rounded-xl text-[10px] font-bold text-blue-600 shadow-sm">{o.name}</span>
+                                          )) : <span className="text-xs italic text-slate-300">None detected</span>}
+                                       </div>
+                                    </div>
+                                    <div className="space-y-3">
+                                       <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-2"><MapPin className="w-4 h-4 text-slate-500" /> Mentioned Prisons</h4>
+                                       <div className="flex flex-wrap gap-2">
+                                          {c.entities?.prisons && c.entities.prisons.length > 0 ? c.entities.prisons.map((p, i) => (
+                                            <span key={i} className="px-3 py-1 bg-white border border-slate-200 rounded-xl text-[10px] font-bold text-emerald-600 shadow-sm flex items-center gap-1">
+                                              {p.name} 
+                                              {p.id && <span className="text-[7px] opacity-40 font-black">#{p.id}</span>}
+                                            </span>
+                                          )) : <span className="text-xs italic text-slate-300">None detected</span>}
+                                       </div>
+                                    </div>
                                  </div>
                               </div>
                             </div>
@@ -931,7 +1219,6 @@ export const App: React.FC = () => {
                  {editingClusterId && (
                    <ClusterEditor cluster={state.clusters.find(c => c.id === editingClusterId)!} onClose={() => setEditingClusterId(null)} onSave={(updated) => { setState(s => ({ ...s, clusters: s.clusters.map(c => c.id === updated.id ? updated : c) })); setEditingClusterId(null); syncReconciliation(); }} />
                  )}
-                 {/* Next Step Button */}
                  <div className="bg-white border-t p-6 flex justify-center">
                     <button 
                       onClick={() => setState(s => ({ ...s, uiState: 'entities' }))}
@@ -989,3 +1276,5 @@ export const App: React.FC = () => {
     </div>
   );
 };
+
+export default App;

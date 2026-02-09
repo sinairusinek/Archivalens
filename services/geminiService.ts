@@ -1,19 +1,7 @@
 
 import { GoogleGenAI, Type } from "@google/genai";
 import { ArchivalPage, Cluster, Tier, DocType } from "../types";
-import { CONTROLLED_VOCABULARY, SUBJECTS_LIST, DOCUMENT_TYPES } from "./vocabulary";
-
-const PRISON_LIST = [
-  "Abu Kabir Lock-up", "Athlit Clearance Camp", "Athlit Detention Camp", "Bethlehem Detention Camp (Villa Salem)",
-  "Boys' Reformatory School, Bethlehem", "Boys' Reformatory School, Rishon", "Boys' Reformatory School, Tulkarem",
-  "Boys' Remand Home Jerusalem", "Carthaga Detention Camp, Sudan", "Central Prison Nablus", "Central Prison, Acre",
-  "Central Prison, Jerusalem", "Cyprus detention camp", "Gilgil Detention Camp, Kenya", "Girls' Home", "Haifa Lock-up",
-  "Jaffa Lock-up", "Jail Labour Co. No. 1 Nur Esh Shams", "Jail Labour Co. No. 2, Athlit", "Jenin Lock-up",
-  "Jerusalem Lock-up", "Latrun Detention Camp", "Malka Flinka", "Mazra'a Detention Camp", "Nablus Prison",
-  "Other Prisons", "Qulqilya Lock-up", "Rafah Detention Camp", "Ramleh Lock-up", "Sarafand Detention Camp",
-  "Sarona Internment Camp", "Sembel Detention Camp, Asmara, Eritrea", "Tel Aviv Lock-up", "Tulkarem Lock-up",
-  "Unknown", "Wilhelma-Hamîdije Internment Camp", "Women's Prison, Bethlehem"
-];
+import { CONTROLLED_VOCABULARY, SUBJECTS_LIST, DOCUMENT_TYPES, PRISON_MASTER_LIST } from "./vocabulary";
 
 const rotateCanvas = (sourceCanvas: HTMLCanvasElement, degrees: number): HTMLCanvasElement => {
   if (degrees === 0) return sourceCanvas;
@@ -144,7 +132,9 @@ const matchInVocabulary = (name: string): number | undefined => {
   if (!name) return undefined;
   const low = name.toLowerCase().trim();
   const match = CONTROLLED_VOCABULARY.find(v => v.name.toLowerCase() === low);
-  return match?.id;
+  if (match) return match.id;
+  const prisonMatch = PRISON_MASTER_LIST.find(p => p.name.toLowerCase() === low);
+  return prisonMatch?.id;
 };
 
 const findDocTypeByName = (name: string): DocType | undefined => {
@@ -235,35 +225,36 @@ export const clusterPages = async (pages: ArchivalPage[], tier: Tier): Promise<C
   
   const vocabSummary = CONTROLLED_VOCABULARY.map(v => v.name).join('|');
   const docTypesSummary = DOCUMENT_TYPES.map(d => d.name).join('|');
+  const prisonsSummary = PRISON_MASTER_LIST.map(p => p.name).join('|');
 
   const prompt = `
     TASK: CLUSTERING & METADATA EXTRACTION
-    Analyze the provided archival pages and group them into physical documents (Clusters).
+    Analyze the provided archival pages and group them into logical documents (Clusters).
 
-    CRITICAL: YOU MUST EXTRACT SENDERS AND RECIPIENTS FROM THE 'indexName' FIELD.
-    The 'indexName' often contains text like "Correspondence from [Name] to [Name]" or "Letter to [Name] from [Name]".
-    Example: "Correspondence from Margery Fry to K.W. Blaxter" 
-    - SENDER: Margery Fry
-    - RECIPIENT: K.W. Blaxter
-    Failure to extract these names when present in the title is a MAJOR ERROR.
+    CRITICAL EXTRACTION RULES:
+    1. EXTRACT SENDERS AND RECIPIENTS from both 'indexName' AND text content.
+    2. NATIONALITY: For all people, identify nationality: "Arab", "British", "German", "Jew", "Other".
+    3. MENTIONED ORGANIZATIONS: List all organizations, committees, or agencies mentioned in the document.
+    4. MENTIONED PRISONS: List all prisons, lock-ups, or detention camps mentioned. Use the MASTER PRISON LIST below for reference but extract any mentioned.
+    5. ORGANIZATIONAL CATEGORY: For people, identify their organization type (e.g. "British Administration", "Jewish Agency", "Zionist Underground").
 
     For EACH cluster:
-    - title: Accurate descriptive title.
+    - title: Descriptive title.
     - pageRange: e.g. "Page 1-3".
     - summary: 1-2 sentence description.
     - pageIds: array of IDs belonging to this cluster.
     - senders: array of {name, role, organizationCategory, nationality}.
     - recipients: array of {name, role, organizationCategory, nationality}.
-    - entities: list people mentioned in text including {name, organizationCategory, nationality}.
+    - entities: {
+        people: array of {name, organizationCategory, nationality},
+        organizations: array of {name},
+        prisons: array of {name},
+        roles: array of {name}
+      }
 
-    NATIONALITY REQUIREMENT: For all people (senders, recipients, mentioned entities), identify nationality from text. Select ONLY from: "Arab", "British", "German", "Jew", "Other".
-    ORGANIZATIONAL CATEGORY: Identify the type of organization they are affiliated with if mentioned.
-
-    DOC TYPES: MUST select from names in this list: [${docTypesSummary}].
-    SUBJECTS: select from: [${SUBJECTS_LIST.join('|')}].
-
-    REFERENCE VOCABULARY: [${vocabSummary.slice(0, 30000)}]
-    PRISON LIST: ${PRISON_LIST.join('|')}
+    MASTER PRISON LIST: ${prisonsSummary}
+    DOC TYPES: MUST select from [${docTypesSummary}].
+    SUBJECTS: select from [${SUBJECTS_LIST.join('|')}].
 
     Input Data:
     ${JSON.stringify(inputData)}
@@ -299,7 +290,7 @@ export const clusterPages = async (pages: ArchivalPage[], tier: Tier): Promise<C
                     name: { type: Type.STRING }, 
                     role: { type: Type.STRING },
                     organizationCategory: { type: Type.STRING },
-                    nationality: { type: Type.STRING, description: 'Select: Arab, British, German, Jew, Other' }
+                    nationality: { type: Type.STRING }
                   },
                   required: ["name"]
                 } 
@@ -312,7 +303,7 @@ export const clusterPages = async (pages: ArchivalPage[], tier: Tier): Promise<C
                     name: { type: Type.STRING }, 
                     role: { type: Type.STRING },
                     organizationCategory: { type: Type.STRING },
-                    nationality: { type: Type.STRING, description: 'Select: Arab, British, German, Jew, Other' }
+                    nationality: { type: Type.STRING }
                   },
                   required: ["name"]
                 } 
@@ -327,14 +318,15 @@ export const clusterPages = async (pages: ArchivalPage[], tier: Tier): Promise<C
                         properties: {
                             name: { type: Type.STRING },
                             organizationCategory: { type: Type.STRING },
-                            nationality: { type: Type.STRING, description: 'Select: Arab, British, German, Jew, Other' }
+                            nationality: { type: Type.STRING }
                         }
                     }
                   }, 
-                  organizations: { type: Type.ARRAY, items: { type: Type.STRING } }, 
-                  roles: { type: Type.ARRAY, items: { type: Type.STRING } } 
+                  organizations: { type: Type.ARRAY, items: { type: Type.OBJECT, properties: { name: { type: Type.STRING } } } }, 
+                  prisons: { type: Type.ARRAY, items: { type: Type.OBJECT, properties: { name: { type: Type.STRING } } } }, 
+                  roles: { type: Type.ARRAY, items: { type: Type.OBJECT, properties: { name: { type: Type.STRING } } } } 
                 },
-                required: ["people", "organizations", "roles"]
+                required: ["people", "organizations", "roles", "prisons"]
               }
             },
             required: ["title", "pageIds", "senders", "recipients"]
@@ -352,8 +344,9 @@ export const clusterPages = async (pages: ArchivalPage[], tier: Tier): Promise<C
       recipients: (c.recipients || []).map((r: any) => ({ ...r, id: matchInVocabulary(r.name) })),
       entities: {
         people: (c.entities?.people || []).map((p: any) => ({ ...p, name: String(p.name), id: matchInVocabulary(String(p.name)) })),
-        organizations: (c.entities?.organizations || []).map((name: string) => ({ name: String(name), id: matchInVocabulary(String(name)) })),
-        roles: (c.entities?.roles || []).map((name: string) => ({ name: String(name), id: matchInVocabulary(String(name)) })),
+        organizations: (c.entities?.organizations || []).map((o: any) => ({ ...o, name: String(o.name), id: matchInVocabulary(String(o.name)) })),
+        prisons: (c.entities?.prisons || []).map((p: any) => ({ ...p, name: String(p.name), id: matchInVocabulary(String(p.name)) })),
+        roles: (c.entities?.roles || []).map((r: any) => ({ ...r, name: String(r.name), id: matchInVocabulary(String(r.name)) })),
       }
     }));
   };

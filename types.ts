@@ -21,7 +21,7 @@ export interface ProcessingStatus {
 export interface EntityReference {
   name: string;
   id?: number;
-  type?: 'person' | 'organization' | 'role';
+  type?: 'person' | 'organization' | 'role' | 'prison';
   gender?: string;
   lifeSpan?: string;
   politicalAffiliation?: string;
@@ -31,12 +31,14 @@ export interface EntityReference {
   notes?: string;
   wikidata?: string;
   otherLinks?: string;
+  organizationCategory?: string;
 }
 
 export interface NamedEntities {
   people: EntityReference[];
   organizations: EntityReference[];
   roles: EntityReference[];
+  prisons: EntityReference[];
 }
 
 export interface Correspondent {
@@ -114,7 +116,7 @@ export interface SourceAppearance {
 export interface ReconciliationRecord {
   id: string;
   extractedName: string;
-  type: 'person' | 'organization' | 'role';
+  type: 'person' | 'organization' | 'role' | 'prison';
   matchedId?: number;
   matchedName?: string;
   status: 'pending' | 'matched' | 'rejected' | 'custom';
